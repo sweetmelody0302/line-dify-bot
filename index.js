@@ -30,6 +30,17 @@ app.post('/webhook', (req, res) => {
 // 負責與 Dify 大腦溝通並回傳給 LINE 的函數
 async function handleMessage(userMessage, replyToken, userId) {
     try {
+        // 【新增神兵利器】先讓 LINE 顯示「...」讀取中的打字動畫，安撫使用者
+        await axios.post('https://api.line.me/v2/bot/chat/loading/start', {
+            chatId: userId,
+            loadingSeconds: 10 // 動畫最長顯示 10 秒（只要我們把訊息傳回去，動畫就會提早自動消失）
+        }, {
+            headers: {
+                'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
         // 1. 將使用者的訊息傳送給 Dify Agent (改用 streaming 模式)
         const difyResponse = await axios.post('https://api.dify.ai/v1/chat-messages', {
             inputs: {},
