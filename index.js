@@ -31,20 +31,28 @@ app.post('/webhook', (req, res) => {
 async function handleMessage(userMessage, replyToken, userId) {
     try {
         // 【新增神兵利器】先讓 LINE 顯示「...」讀取中的打字動畫，安撫使用者
-        await axios.post('https://api.line.me/v2/bot/chat/loading/start', {
-            chatId: userId,
-            loadingSeconds: 10 // 動畫最長顯示 10 秒（只要我們把訊息傳回去，動畫就會提早自動消失）
-        }, {
-            headers: {
-                'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
-                'Content-Type': 'application/json'
-            }
-        });
+        try {
+            await axios.post('https://api.line.me/v2/bot/chat/loading/start', {
+                chatId: userId,
+                loadingSeconds: 10 // 動畫最長顯示 10 秒（只要我們把訊息傳回去，動畫就會提早自動消失）
+            }, {
+                headers: {
+                    'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+        } catch (loadingErr) {
+            // 避免電腦版 LINE 不支援時報錯中斷
+            console.log('Loading animation not supported:', loadingErr.message);
+        }
+
+        // 【Emoji 魔法】在背後偷偷告訴 AI 要加表情符號
+        const enrichedMessage = userMessage + "\n\n(系統提示：請用親切溫暖的語氣回答，多使用可愛的 Emoji 表情符號✨，且不要使用 markdown 的粗體星號)";
 
         // 1. 將使用者的訊息傳送給 Dify Agent (改用 streaming 模式)
         const difyResponse = await axios.post('https://api.dify.ai/v1/chat-messages', {
             inputs: {},
-            query: userMessage,
+            query: enrichedMessage,
             response_mode: 'streaming', // <--- 修正：Dify Agent 專用模式
             user: userId
         }, {
@@ -56,14 +64,24 @@ async function handleMessage(userMessage, replyToken, userId) {
         });
 
         let replyText = '';
+        let streamBuffer = ''; // 【重要修復：斷字殺手】水桶緩衝區
 
         // 2. 接水管：收集 Dify 像打字一樣一段段傳過來的字
         difyResponse.data.on('data', (chunk) => {
-            const lines = chunk.toString().split('\n');
+            streamBuffer += chunk.toString('utf8');
+            let lines = streamBuffer.split('\n');
+            
+            // 把最後一行（可能還沒切完整的資料）留到下一次再處理
+            streamBuffer = lines.pop(); 
+
             for (const line of lines) {
-                if (line.startsWith('data: ')) {
+                const trimmedLine = line.trim();
+                if (trimmedLine.startsWith('data:')) {
                     try {
-                        const data = JSON.parse(line.slice(6));
+                        const jsonStr = trimmedLine.substring(5).trim();
+                        if (!jsonStr) continue;
+                        const data = JSON.parse(jsonStr);
+                        
                         if (data.event === 'message' || data.event === 'agent_message') {
                             replyText += data.answer;
                         }
@@ -78,6 +96,9 @@ async function handleMessage(userMessage, replyToken, userId) {
         difyResponse.data.on('end', async () => {
             if (!replyText) replyText = "抱歉，實習處大腦剛剛恍神了，請再問我一次！";
             
+            // 【畫面優化】把醜醜的 markdown 粗體符號拔掉
+            replyText = replyText.replace(/\*\*/g, '');
+
             await axios.post('https://api.line.me/v2/bot/message/reply', {
                 replyToken: replyToken,
                 messages: [{
