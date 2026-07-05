@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
+const { StringDecoder } = require('string_decoder');
 
 const app = express();
 app.use(express.json({
@@ -168,8 +169,8 @@ async function handleMessage(userMessage, replyToken, userId) {
             console.log('Loading animation not supported:', loadingErr.message);
         }
 
-        // 【Emoji 魔法】在背後偷偷告訴 AI 要加表情符號
-        const enrichedMessage = userMessage + "\n\n(系統提示：請用親切溫暖的語氣回答，多使用可愛的 Emoji 表情符號✨，且不要使用 markdown 的粗體星號)";
+        // 補充 LINE 顯示限制，避免回覆出現不適合手機閱讀的格式。
+        const enrichedMessage = userMessage + "\n\n(系統提示：請用專業、親切、清楚的語氣回答；不要使用 markdown 粗體星號；不要過度使用 Emoji 或特殊符號。)";
 
         // 1. 將使用者的訊息傳送給 Dify Agent (改用 streaming 模式)
         const difyResponse = await axios.post('https://api.dify.ai/v1/chat-messages', {
@@ -187,15 +188,9 @@ async function handleMessage(userMessage, replyToken, userId) {
 
         let replyText = '';
         let streamBuffer = ''; // 【重要修復：斷字殺手】水桶緩衝區
+        const utf8Decoder = new StringDecoder('utf8');
 
-        // 2. 接水管：收集 Dify 像打字一樣一段段傳過來的字
-        difyResponse.data.on('data', (chunk) => {
-            streamBuffer += chunk.toString('utf8');
-            let lines = streamBuffer.split('\n');
-            
-            // 把最後一行（可能還沒切完整的資料）留到下一次再處理
-            streamBuffer = lines.pop(); 
-
+        function processStreamLines(lines) {
             for (const line of lines) {
                 const trimmedLine = line.trim();
                 if (trimmedLine.startsWith('data:')) {
@@ -203,7 +198,7 @@ async function handleMessage(userMessage, replyToken, userId) {
                         const jsonStr = trimmedLine.substring(5).trim();
                         if (!jsonStr) continue;
                         const data = JSON.parse(jsonStr);
-                        
+
                         if (data.event === 'message' || data.event === 'agent_message') {
                             replyText += data.answer;
                         }
@@ -212,11 +207,27 @@ async function handleMessage(userMessage, replyToken, userId) {
                     }
                 }
             }
+        }
+
+        // 2. 接水管：收集 Dify 像打字一樣一段段傳過來的字
+        difyResponse.data.on('data', (chunk) => {
+            streamBuffer += utf8Decoder.write(chunk);
+            let lines = streamBuffer.split('\n');
+
+            // 把最後一行（可能還沒切完整的資料）留到下一次再處理
+            streamBuffer = lines.pop();
+
+            processStreamLines(lines);
         });
 
         // 3. 講完了：將收集好的答案回傳給 LINE
         difyResponse.data.on('end', async () => {
             try {
+                streamBuffer += utf8Decoder.end();
+                if (streamBuffer.trim()) {
+                    processStreamLines([streamBuffer]);
+                }
+
                 if (!replyText) replyText = "抱歉，實習處大腦剛剛恍神了，請再問我一次！";
 
                 // 【畫面優化】把醜醜的 markdown 粗體符號拔掉
