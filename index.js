@@ -29,6 +29,7 @@ const CLOUDINARY_UPLOAD_FOLDER = 'line-remote-publisher';
 const REMOTE_DRAFT_TTL_MS = 6 * 60 * 60 * 1000;
 const REMOTE_MAX_IMAGES = 4;
 const LINE_TEXT_LIMIT = 5000;
+const FRIENDLY_REPLY_EMOJI = ['😊', '📌', '✅', '🔎', '📝', '📢', '🌱', '☎️'];
 const remoteDrafts = new Map();
 
 const FOLLOW_WELCOME_MESSAGES = [
@@ -108,6 +109,16 @@ function isValidLineSignature(req, channelSecret = LINE_CHANNEL_SECRET) {
     }
 
     return crypto.timingSafeEqual(expectedBuffer, signatureBuffer);
+}
+
+function normalizeLineReplyText(text) {
+    let normalizedText = text.replace(/\*\*/g, '').replace(/\uFFFD/g, '').trim();
+
+    if (!FRIENDLY_REPLY_EMOJI.some((emoji) => normalizedText.includes(emoji))) {
+        normalizedText += '\n\n😊';
+    }
+
+    return normalizedText;
 }
 
 // 接收 LINE 訊息的 Webhook 端點
@@ -514,7 +525,7 @@ async function handleMessage(userMessage, replyToken, userId) {
         }
 
         // 補充 LINE 顯示限制，避免回覆出現不適合手機閱讀的格式。
-        const enrichedMessage = userMessage + "\n\n(系統提示：請用專業、親切、清楚的語氣回答；不要使用 markdown 粗體星號；不要過度使用 Emoji 或特殊符號。)";
+        const enrichedMessage = userMessage + "\n\n(系統提示：請用專業、親切、清楚的語氣回答；不要使用 markdown 粗體星號；每則回覆請自然加入 1 到 3 個常見 Emoji 小圖標，例如 😊、📌、✅、🔎、☎️；避免罕見符號、裝飾字、顏文字或特殊字元。)";
 
         // 1. 將使用者的訊息傳送給 Dify Agent (改用 streaming 模式)
         const difyResponse = await axios.post('https://api.dify.ai/v1/chat-messages', {
@@ -574,8 +585,8 @@ async function handleMessage(userMessage, replyToken, userId) {
 
                 if (!replyText) replyText = "抱歉，實習處大腦剛剛恍神了，請再問我一次！";
 
-                // 【畫面優化】把醜醜的 markdown 粗體符號拔掉
-                replyText = replyText.replace(/\*\*/g, '');
+                // LINE 手機畫面優化：移除 markdown 粗體符號與亂碼替代字，並保留一點親切小圖標。
+                replyText = normalizeLineReplyText(replyText);
 
                 await axios.post(LINE_REPLY_API_URL, {
                     replyToken: replyToken,
