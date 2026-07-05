@@ -289,9 +289,13 @@ async function replyRemotePreview(replyToken, userId) {
     }
 
     const draftText = getRemoteDraftText(draft) || '未加入文字';
-    const previewText = `發文預覽\n\n文字：\n${draftText}\n\n圖片：已收到 ${draft.images.length} 張\n\n若確認要發佈到「實習處 LINE 官方帳號」所有好友，請輸入：\n確認發佈\n\n若不要發佈，請輸入：\n取消`;
+    const previewTextBody = draftText.length > 3000
+        ? `${draftText.slice(0, 3000)}\n...（文字較長，預覽已截短）`
+        : draftText;
+    const previewText = `發文預覽\n\n文字：\n${previewTextBody}\n\n圖片：已收到 ${draft.images.length} 張，圖片會在下一則訊息顯示。\n\n若確認要發佈到「實習處 LINE 官方帳號」所有好友，請輸入：\n確認發佈\n\n若不要發佈，請輸入：\n取消`;
+    const previewMessages = buildRemotePreviewMessages(previewText, draft.images);
 
-    await replyRemoteText(replyToken, previewText);
+    await replyRemoteMessages(replyToken, previewMessages);
 }
 
 async function publishRemoteDraft(replyToken, userId) {
@@ -378,7 +382,31 @@ function buildRemoteBroadcastMessages(draft) {
     return messages.slice(0, 5);
 }
 
+function buildRemotePreviewMessages(previewText, images) {
+    const messages = [{
+        type: 'text',
+        text: previewText
+    }];
+
+    for (const image of images.slice(0, REMOTE_MAX_IMAGES)) {
+        messages.push({
+            type: 'image',
+            originalContentUrl: image.originalContentUrl,
+            previewImageUrl: image.previewImageUrl
+        });
+    }
+
+    return messages.slice(0, 5);
+}
+
 async function replyRemoteText(replyToken, text) {
+    await replyRemoteMessages(replyToken, [{
+        type: 'text',
+        text
+    }]);
+}
+
+async function replyRemoteMessages(replyToken, messages) {
     if (!REMOTE_LINE_CHANNEL_ACCESS_TOKEN) {
         console.error('REMOTE_WEBHOOK_ERROR', 'Missing REMOTE_LINE_CHANNEL_ACCESS_TOKEN');
         return;
@@ -386,10 +414,7 @@ async function replyRemoteText(replyToken, text) {
 
     await axios.post(LINE_REPLY_API_URL, {
         replyToken,
-        messages: [{
-            type: 'text',
-            text
-        }]
+        messages
     }, {
         headers: lineHeaders(REMOTE_LINE_CHANNEL_ACCESS_TOKEN)
     });
