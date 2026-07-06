@@ -218,30 +218,31 @@ async function handleRemoteEvent(event) {
 
 async function handleRemoteText(replyToken, userId, text) {
     const trimmedText = (text || '').trim();
+    const commandText = normalizeRemoteCommandText(trimmedText);
 
     if (!trimmedText) {
         await replyRemoteText(replyToken, '請輸入公告文字，或傳送圖片。');
         return;
     }
 
-    if (trimmedText === '開始發文') {
+    if (commandText === '開始發文') {
         remoteDrafts.set(userId, createRemoteDraft());
         await replyRemoteText(replyToken, '已開始新的發文草稿。\n\n請傳送公告文字與圖片。完成後請輸入「預覽」。');
         return;
     }
 
-    if (trimmedText === '取消') {
+    if (commandText === '取消') {
         remoteDrafts.delete(userId);
         await replyRemoteText(replyToken, '已取消並清除目前的發文草稿。');
         return;
     }
 
-    if (trimmedText === '預覽') {
+    if (commandText === '預覽') {
         await replyRemotePreview(replyToken, userId);
         return;
     }
 
-    if (trimmedText === '確認發佈' || trimmedText === '確認發佈到全部好友') {
+    if (commandText === '確認發佈' || commandText === '確認發布' || commandText === '確認發佈到全部好友' || commandText === '確認發布到全部好友') {
         await publishRemoteDraft(replyToken, userId);
         return;
     }
@@ -325,15 +326,28 @@ async function publishRemoteDraft(replyToken, userId) {
 
     const messages = buildRemoteBroadcastMessages(draft);
 
-    await axios.post(LINE_BROADCAST_API_URL, {
-        messages
-    }, {
-        headers: lineHeaders(INTERNSHIP_LINE_CHANNEL_ACCESS_TOKEN)
-    });
+    try {
+        await axios.post(LINE_BROADCAST_API_URL, {
+            messages
+        }, {
+            headers: lineHeaders(INTERNSHIP_LINE_CHANNEL_ACCESS_TOKEN)
+        });
+    } catch (error) {
+        console.error('REMOTE_BROADCAST_ERROR', error.response?.status || '', error.response?.data || error.message);
+        await replyRemoteText(replyToken, '公告發佈失敗，草稿已保留，尚未送出到實習處 LINE 官方帳號。\n\n請到 Zeabur Logs 搜尋：\nREMOTE_BROADCAST_ERROR\n\n確認錯誤原因後再處理。');
+        return;
+    }
 
     remoteDrafts.delete(userId);
     console.log('REMOTE_BROADCAST_SENT');
     await replyRemoteText(replyToken, `已發佈到實習處 LINE 官方帳號所有好友。\n\n本次發佈內容：${messages.length} 則訊息。`);
+}
+
+function normalizeRemoteCommandText(text) {
+    return text
+        .replace(/\s+/g, '')
+        .replace(/[。．.!！?？、，,;；:：]/g, '')
+        .trim();
 }
 
 function createRemoteDraft() {
