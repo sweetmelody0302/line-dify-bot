@@ -31,8 +31,10 @@ const CLOUDINARY_UPLOAD_FOLDER = 'line-remote-publisher';
 const REMOTE_DRAFT_TTL_MS = 6 * 60 * 60 * 1000;
 const REMOTE_MAX_IMAGES = 4;
 const LINE_TEXT_LIMIT = 5000;
+const ADMIN_IMAGE_HANDOFF_TTL_MS = 10 * 60 * 1000;
 const FRIENDLY_REPLY_EMOJI = ['😊', '📌', '✅', '🔎', '📝', '📢', '🌱', '☎️'];
 const remoteDrafts = new Map();
+const adminImageHandoffs = new Map();
 
 const FOLLOW_WELCOME_MESSAGES = [
     {
@@ -165,6 +167,16 @@ app.post('/webhook', async (req, res) => {
                 // 啟動大腦思考流程
                 handleMessage(userMessage, replyToken, userId);
             }
+
+            if (event.type === 'message' && event.message && event.message.type === 'image') {
+                const handoffKey = getAdminHandoffKey(event.source);
+                if (handoffKey && hasActiveAdminImageHandoff(handoffKey)) {
+                    handleAdminAlertImage(event.replyToken, event.source, event.message.id);
+                    continue;
+                }
+
+                handleAdminImageWithoutPendingRequest(event.replyToken);
+            }
         }
 
         await Promise.all(followReplyTasks);
@@ -216,15 +228,102 @@ async function handleAdminAlert(userMessage, replyToken, source) {
         });
 
         console.log('ADMIN_ALERT_SENT');
-        await replyLineText(replyToken, '已收到您的訊息，這類問題將轉交實習處管理者確認。\n\n請避免在 LINE 中提供身分證字號、住址等敏感個資。');
+        rememberAdminImageHandoff(source, alertText);
+        await replyLineText(replyToken, '已收到您的訊息，這類問題將轉交實習處管理者確認。\n\n若需要補充圖片，請在 10 分鐘內直接傳送圖片，我會一併轉交管理者。\n\n請避免在 LINE 中提供身分證字號、住址等敏感個資。');
     } catch (error) {
         console.error('ADMIN_ALERT_ERROR', error.response?.data || error.message);
         await replyLineText(replyToken, '管理者通知暫時送出失敗，請稍後再試一次。\n\n若事情較急，請於上班時間撥打學校總機 (03) 3294188，再轉接實習處。');
     }
 }
 
+async function handleAdminAlertImage(replyToken, source, messageId) {
+    try {
+        console.log('ADMIN_ALERT_IMAGE_TRIGGERED');
+
+        const missingConfig = getMissingAdminImageConfig();
+        if (missingConfig.length > 0) {
+            console.error('ADMIN_ALERT_ERROR', `Missing config: ${missingConfig.join(', ')}`);
+            await replyLineText(replyToken, '圖片轉交功能尚未設定完成，請先通知管理者確認系統設定。');
+            return;
+        }
+
+        const handoffKey = getAdminHandoffKey(source);
+        const handoff = adminImageHandoffs.get(handoffKey);
+        if (!handoff || handoff.expiresAt <= Date.now()) {
+            adminImageHandoffs.delete(handoffKey);
+            await replyLineText(replyToken, '圖片轉交時間已超過 10 分鐘。\n\n如需轉交圖片給管理者，請先輸入：\n*我要傳圖片給管理者\n\n再重新傳送圖片。');
+            return;
+        }
+
+        const image = await downloadLineImage(messageId, LINE_CHANNEL_ACCESS_TOKEN);
+        const uploadedImage = await uploadImageToCloudinary(image);
+
+        await axios.post(LINE_PUSH_API_URL, {
+            to: ADMIN_LINE_TARGET_ID,
+            messages: [
+                {
+                    type: 'text',
+                    text: buildAdminImageAlertText(handoff.alertText, source)
+                },
+                {
+                    type: 'image',
+                    originalContentUrl: uploadedImage.secureUrl,
+                    previewImageUrl: uploadedImage.secureUrl
+                }
+            ]
+        }, {
+            headers: lineHeaders()
+        });
+
+        handoff.expiresAt = Date.now() + ADMIN_IMAGE_HANDOFF_TTL_MS;
+        console.log('ADMIN_ALERT_IMAGE_SENT');
+        await replyLineText(replyToken, '已收到圖片，並已轉交實習處管理者確認。');
+    } catch (error) {
+        console.error('ADMIN_ALERT_ERROR', error.response?.data || error.message);
+        await replyLineText(replyToken, '圖片轉交暫時失敗，請稍後再傳一次。\n\n若事情較急，請於上班時間撥打學校總機 (03) 3294188，再轉接實習處。');
+    }
+}
+
+async function handleAdminImageWithoutPendingRequest(replyToken) {
+    try {
+        await replyLineText(replyToken, '目前圖片不會直接轉交管理者。\n\n如需轉交圖片，請先輸入：\n*我要傳圖片給管理者\n\n接著在 10 分鐘內傳送圖片。');
+    } catch (error) {
+        console.error('ADMIN_ALERT_ERROR', error.response?.data || error.message);
+    }
+}
+
 function isAdminAlertMessage(text) {
     return (text || '').trim().startsWith('*');
+}
+
+function rememberAdminImageHandoff(source, alertText) {
+    const handoffKey = getAdminHandoffKey(source);
+    if (!handoffKey) return;
+
+    cleanupAdminImageHandoffs();
+    adminImageHandoffs.set(handoffKey, {
+        alertText,
+        expiresAt: Date.now() + ADMIN_IMAGE_HANDOFF_TTL_MS
+    });
+}
+
+function getAdminHandoffKey(source) {
+    return source?.userId || source?.groupId || source?.roomId;
+}
+
+function hasActiveAdminImageHandoff(handoffKey) {
+    cleanupAdminImageHandoffs();
+    const handoff = adminImageHandoffs.get(handoffKey);
+    return Boolean(handoff && handoff.expiresAt > Date.now());
+}
+
+function cleanupAdminImageHandoffs() {
+    const now = Date.now();
+    for (const [handoffKey, handoff] of adminImageHandoffs.entries()) {
+        if (handoff.expiresAt <= now) {
+            adminImageHandoffs.delete(handoffKey);
+        }
+    }
 }
 
 function isAdminTargetIdRequest(text) {
@@ -254,16 +353,7 @@ function extractAdminAlertText(text) {
 function buildAdminAlertText(alertText, source) {
     const sourceType = source?.type || 'user';
     const sourceId = source?.userId || source?.groupId || source?.roomId || 'unknown';
-    const submittedAt = new Intl.DateTimeFormat('zh-TW', {
-        timeZone: 'Asia/Taipei',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false
-    }).format(new Date());
+    const submittedAt = formatTaipeiDateTime(new Date());
 
     return `【管理者通知】
 
@@ -278,6 +368,39 @@ ${alertText.slice(0, 3500)}
 
 請管理者至 LINE 官方帳號後台查看對話。
 若涉及學生個案或個人資料，請依正式流程處理。`;
+}
+
+function buildAdminImageAlertText(alertText, source) {
+    const sourceType = source?.type || 'user';
+    const sourceId = source?.userId || source?.groupId || source?.roomId || 'unknown';
+    const submittedAt = formatTaipeiDateTime(new Date());
+
+    return `【管理者圖片通知】
+
+來源：實習處 LINE 官方帳號
+類型：圖片補充
+時間：${submittedAt}
+來源類型：${sourceType}
+來源 ID：${sourceId}
+
+前次人工協助訊息：
+${alertText.slice(0, 1200)}
+
+使用者剛剛傳送了一張圖片，圖片會在下一則訊息顯示。
+若涉及學生個案或個人資料，請依正式流程處理。`;
+}
+
+function formatTaipeiDateTime(date) {
+    return new Intl.DateTimeFormat('zh-TW', {
+        timeZone: 'Asia/Taipei',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    }).format(date);
 }
 
 async function replyLineText(replyToken, text) {
@@ -561,9 +684,13 @@ async function replyRemoteMessages(replyToken, messages) {
 }
 
 async function downloadRemoteLineImage(messageId) {
+    return downloadLineImage(messageId, REMOTE_LINE_CHANNEL_ACCESS_TOKEN);
+}
+
+async function downloadLineImage(messageId, accessToken) {
     const response = await axios.get(`${LINE_CONTENT_API_BASE_URL}/${messageId}/content`, {
         headers: {
-            'Authorization': `Bearer ${REMOTE_LINE_CHANNEL_ACCESS_TOKEN}`
+            'Authorization': `Bearer ${accessToken}`
         },
         responseType: 'arraybuffer'
     });
@@ -620,6 +747,18 @@ function createCloudinarySignature(params) {
 function getMissingRemoteImageConfig() {
     return [
         ['REMOTE_LINE_CHANNEL_ACCESS_TOKEN', REMOTE_LINE_CHANNEL_ACCESS_TOKEN],
+        ['CLOUDINARY_CLOUD_NAME', CLOUDINARY_CLOUD_NAME],
+        ['CLOUDINARY_API_KEY', CLOUDINARY_API_KEY],
+        ['CLOUDINARY_API_SECRET', CLOUDINARY_API_SECRET]
+    ]
+        .filter(([, value]) => !value)
+        .map(([name]) => name);
+}
+
+function getMissingAdminImageConfig() {
+    return [
+        ['ADMIN_LINE_TARGET_ID', ADMIN_LINE_TARGET_ID],
+        ['LINE_CHANNEL_ACCESS_TOKEN', LINE_CHANNEL_ACCESS_TOKEN],
         ['CLOUDINARY_CLOUD_NAME', CLOUDINARY_CLOUD_NAME],
         ['CLOUDINARY_API_KEY', CLOUDINARY_API_KEY],
         ['CLOUDINARY_API_SECRET', CLOUDINARY_API_SECRET]
