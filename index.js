@@ -20,8 +20,10 @@ const INTERNSHIP_LINE_CHANNEL_ACCESS_TOKEN = process.env.INTERNSHIP_LINE_CHANNEL
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
+const ADMIN_LINE_TARGET_ID = process.env.ADMIN_LINE_TARGET_ID;
 
 const LINE_REPLY_API_URL = 'https://api.line.me/v2/bot/message/reply';
+const LINE_PUSH_API_URL = 'https://api.line.me/v2/bot/message/push';
 const LINE_LOADING_API_URL = 'https://api.line.me/v2/bot/chat/loading/start';
 const LINE_BROADCAST_API_URL = 'https://api.line.me/v2/bot/message/broadcast';
 const LINE_CONTENT_API_BASE_URL = 'https://api-data.line.me/v2/bot/message';
@@ -150,6 +152,16 @@ app.post('/webhook', async (req, res) => {
                 const replyToken = event.replyToken;
                 const userId = event.source.userId;
 
+                if (isAdminTargetIdRequest(userMessage)) {
+                    handleAdminTargetIdRequest(replyToken, event.source);
+                    continue;
+                }
+
+                if (isAdminAlertMessage(userMessage)) {
+                    handleAdminAlert(userMessage, replyToken, event.source);
+                    continue;
+                }
+
                 // 啟動大腦思考流程
                 handleMessage(userMessage, replyToken, userId);
             }
@@ -175,6 +187,109 @@ async function handleFollow(event) {
     });
 
     console.log('FOLLOW_WELCOME_REPLY_SENT');
+}
+
+async function handleAdminAlert(userMessage, replyToken, source) {
+    try {
+        console.log('ADMIN_ALERT_TRIGGERED');
+
+        const alertText = extractAdminAlertText(userMessage);
+        if (!alertText) {
+            await replyLineText(replyToken, '請在 * 後面輸入要轉交管理者的內容。\n\n例如：\n*我想詢問學生實習個案');
+            return;
+        }
+
+        if (!ADMIN_LINE_TARGET_ID) {
+            console.error('ADMIN_ALERT_ERROR', 'Missing ADMIN_LINE_TARGET_ID');
+            await replyLineText(replyToken, '已收到您的人工協助訊息，但目前管理者通知尚未完成設定。\n\n若事情較急，請於上班時間撥打學校總機 (03) 3294188，再轉接實習處。');
+            return;
+        }
+
+        await axios.post(LINE_PUSH_API_URL, {
+            to: ADMIN_LINE_TARGET_ID,
+            messages: [{
+                type: 'text',
+                text: buildAdminAlertText(alertText, source)
+            }]
+        }, {
+            headers: lineHeaders()
+        });
+
+        console.log('ADMIN_ALERT_SENT');
+        await replyLineText(replyToken, '已收到您的訊息，這類問題將轉交實習處管理者確認。\n\n請避免在 LINE 中提供身分證字號、住址等敏感個資。');
+    } catch (error) {
+        console.error('ADMIN_ALERT_ERROR', error.response?.data || error.message);
+        await replyLineText(replyToken, '管理者通知暫時送出失敗，請稍後再試一次。\n\n若事情較急，請於上班時間撥打學校總機 (03) 3294188，再轉接實習處。');
+    }
+}
+
+function isAdminAlertMessage(text) {
+    return (text || '').trim().startsWith('*');
+}
+
+function isAdminTargetIdRequest(text) {
+    const commandText = normalizeRemoteCommandText(text || '');
+    return commandText === '取得通知ID' || commandText === '查詢通知ID' || commandText === '管理者通知ID';
+}
+
+async function handleAdminTargetIdRequest(replyToken, source) {
+    try {
+        const sourceId = source?.groupId || source?.roomId || source?.userId;
+        if (!sourceId) {
+            await replyLineText(replyToken, '目前無法取得這個聊天室的通知 ID。');
+            return;
+        }
+
+        console.log('ADMIN_TARGET_ID_REQUESTED');
+        await replyLineText(replyToken, `這個聊天室的通知 ID 是：\n${sourceId}\n\n請將它設定到 Zeabur 環境變數：\nADMIN_LINE_TARGET_ID\n\n請不要公開分享這個 ID。`);
+    } catch (error) {
+        console.error('ADMIN_ALERT_ERROR', error.response?.data || error.message);
+    }
+}
+
+function extractAdminAlertText(text) {
+    return (text || '').trim().replace(/^\*+/, '').trim();
+}
+
+function buildAdminAlertText(alertText, source) {
+    const sourceType = source?.type || 'user';
+    const sourceId = source?.userId || source?.groupId || source?.roomId || 'unknown';
+    const submittedAt = new Intl.DateTimeFormat('zh-TW', {
+        timeZone: 'Asia/Taipei',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    }).format(new Date());
+
+    return `【管理者通知】
+
+來源：實習處 LINE 官方帳號
+類型：人工協助
+時間：${submittedAt}
+來源類型：${sourceType}
+來源 ID：${sourceId}
+
+使用者訊息：
+${alertText.slice(0, 3500)}
+
+請管理者至 LINE 官方帳號後台查看對話。
+若涉及學生個案或個人資料，請依正式流程處理。`;
+}
+
+async function replyLineText(replyToken, text) {
+    await axios.post(LINE_REPLY_API_URL, {
+        replyToken,
+        messages: [{
+            type: 'text',
+            text
+        }]
+    }, {
+        headers: lineHeaders()
+    });
 }
 
 // 發文遙控器 Webhook：建立草稿、預覽、確認後廣播到實習處官方帳號
