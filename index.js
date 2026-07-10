@@ -32,9 +32,12 @@ const REMOTE_DRAFT_TTL_MS = 6 * 60 * 60 * 1000;
 const REMOTE_MAX_IMAGES = 4;
 const LINE_TEXT_LIMIT = 5000;
 const ADMIN_IMAGE_HANDOFF_TTL_MS = 10 * 60 * 1000;
+const ADMIN_CASE_TTL_MS = 72 * 60 * 60 * 1000;
 const FRIENDLY_REPLY_EMOJI = ['😊', '📌', '✅', '🔎', '📝', '📢', '🌱', '☎️'];
 const remoteDrafts = new Map();
 const adminImageHandoffs = new Map();
+const adminCases = new Map();
+let adminCaseSequence = 0;
 
 const FOLLOW_WELCOME_MESSAGES = [
     {
@@ -159,6 +162,15 @@ app.post('/webhook', async (req, res) => {
                     continue;
                 }
 
+                if (isFromAdminTarget(event.source)) {
+                    if (isAdminCaseReplyMessage(userMessage)) {
+                        handleAdminCaseReply(replyToken, userMessage);
+                    } else if (userMessage.trim().startsWith('#')) {
+                        replyLineText(replyToken, '回覆格式不正確。\n\n請使用：\n#案件編號 回覆內容\n\n例如：\n#A20260711-001 請於上班時間來電洽詢。');
+                    }
+                    continue;
+                }
+
                 if (isAdminAlertMessage(userMessage)) {
                     handleAdminAlert(userMessage, replyToken, event.source);
                     continue;
@@ -217,18 +229,20 @@ async function handleAdminAlert(userMessage, replyToken, source) {
             return;
         }
 
+        const adminCase = createAdminCase(alertText, source);
+
         await axios.post(LINE_PUSH_API_URL, {
             to: ADMIN_LINE_TARGET_ID,
             messages: [{
                 type: 'text',
-                text: buildAdminAlertText(alertText, source)
+                text: buildAdminAlertText(adminCase, source)
             }]
         }, {
             headers: lineHeaders()
         });
 
         console.log('ADMIN_ALERT_SENT');
-        rememberAdminImageHandoff(source, alertText);
+        rememberAdminImageHandoff(source, adminCase);
         await replyLineText(replyToken, '已收到您的訊息，這類問題將轉交實習處管理者確認。\n\n若需要補充圖片，請在 10 分鐘內直接傳送圖片，我會一併轉交管理者。\n\n請避免在 LINE 中提供身分證字號、住址等敏感個資。');
     } catch (error) {
         console.error('ADMIN_ALERT_ERROR', error.response?.data || error.message);
@@ -263,7 +277,7 @@ async function handleAdminAlertImage(replyToken, source, messageId) {
             messages: [
                 {
                     type: 'text',
-                    text: buildAdminImageAlertText(handoff.alertText, source)
+                    text: buildAdminImageAlertText(handoff.adminCase, source)
                 },
                 {
                     type: 'image',
@@ -296,13 +310,125 @@ function isAdminAlertMessage(text) {
     return (text || '').trim().startsWith('*');
 }
 
-function rememberAdminImageHandoff(source, alertText) {
+function isFromAdminTarget(source) {
+    return Boolean(ADMIN_LINE_TARGET_ID && (
+        source?.groupId === ADMIN_LINE_TARGET_ID ||
+        source?.roomId === ADMIN_LINE_TARGET_ID ||
+        source?.userId === ADMIN_LINE_TARGET_ID
+    ));
+}
+
+function isAdminCaseReplyMessage(text) {
+    return /^#[A-Za-z0-9-]+\s+[\s\S]+/.test((text || '').trim());
+}
+
+async function handleAdminCaseReply(replyToken, text) {
+    try {
+        const parsedReply = parseAdminCaseReply(text);
+        if (!parsedReply) {
+            await replyLineText(replyToken, '回覆格式不正確。\n\n請使用：\n#案件編號 回覆內容');
+            return;
+        }
+
+        cleanupAdminCases();
+        const adminCase = adminCases.get(parsedReply.caseId);
+        if (!adminCase) {
+            await replyLineText(replyToken, '找不到這個案件，可能是案件編號錯誤、已超過 72 小時，或 Zeabur 重新部署後暫存資料已清除。');
+            return;
+        }
+
+        if (!adminCase.userId) {
+            await replyLineText(replyToken, '這個案件沒有可回覆的使用者 ID，請管理者改至 LINE 官方帳號後台查看對話。');
+            return;
+        }
+
+        await axios.post(LINE_PUSH_API_URL, {
+            to: adminCase.userId,
+            messages: [{
+                type: 'text',
+                text: buildAdminReplyToUserText(adminCase.caseId, parsedReply.replyText)
+            }]
+        }, {
+            headers: lineHeaders()
+        });
+
+        adminCase.lastRepliedAt = Date.now();
+        console.log('ADMIN_CASE_REPLY_SENT');
+        await replyLineText(replyToken, `已回覆使用者。\n\n案件編號：${adminCase.caseId}`);
+    } catch (error) {
+        console.error('ADMIN_CASE_REPLY_ERROR', error.response?.data || error.message);
+        await replyLineText(replyToken, '回覆使用者失敗，請稍後再試一次，或改至 LINE 官方帳號後台查看對話。');
+    }
+}
+
+function parseAdminCaseReply(text) {
+    const match = (text || '').trim().match(/^#([A-Za-z0-9-]+)\s+([\s\S]+)$/);
+    if (!match) return null;
+
+    const caseId = normalizeAdminCaseId(match[1]);
+    const replyText = match[2].trim();
+    if (!caseId || !replyText) return null;
+
+    return {
+        caseId,
+        replyText
+    };
+}
+
+function createAdminCase(alertText, source) {
+    cleanupAdminCases();
+
+    const caseId = generateAdminCaseId();
+    const adminCase = {
+        caseId,
+        alertText,
+        userId: source?.userId,
+        sourceType: source?.type || 'user',
+        sourceId: source?.userId || source?.groupId || source?.roomId || 'unknown',
+        createdAt: Date.now(),
+        expiresAt: Date.now() + ADMIN_CASE_TTL_MS,
+        lastRepliedAt: null
+    };
+
+    adminCases.set(caseId, adminCase);
+    return adminCase;
+}
+
+function generateAdminCaseId() {
+    const dateText = getTaipeiDateCompact(new Date());
+
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        adminCaseSequence = (adminCaseSequence % 999) + 1;
+        const caseId = `A${dateText}-${String(adminCaseSequence).padStart(3, '0')}`;
+
+        if (!adminCases.has(caseId)) {
+            return caseId;
+        }
+    }
+
+    return `A${dateText}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+}
+
+function normalizeAdminCaseId(caseId) {
+    return (caseId || '').trim().replace(/^#/, '').toUpperCase();
+}
+
+function cleanupAdminCases() {
+    const now = Date.now();
+    for (const [caseId, adminCase] of adminCases.entries()) {
+        if (adminCase.expiresAt <= now) {
+            adminCases.delete(caseId);
+        }
+    }
+}
+
+function rememberAdminImageHandoff(source, adminCase) {
     const handoffKey = getAdminHandoffKey(source);
     if (!handoffKey) return;
 
     cleanupAdminImageHandoffs();
     adminImageHandoffs.set(handoffKey, {
-        alertText,
+        adminCase,
         expiresAt: Date.now() + ADMIN_IMAGE_HANDOFF_TTL_MS
     });
 }
@@ -350,35 +476,42 @@ function extractAdminAlertText(text) {
     return (text || '').trim().replace(/^\*+/, '').trim();
 }
 
-function buildAdminAlertText(alertText, source) {
-    const sourceType = source?.type || 'user';
-    const sourceId = source?.userId || source?.groupId || source?.roomId || 'unknown';
-    const submittedAt = formatTaipeiDateTime(new Date());
+function buildAdminAlertText(adminCase, source) {
+    const sourceType = adminCase.sourceType || source?.type || 'user';
+    const sourceId = adminCase.sourceId || source?.userId || source?.groupId || source?.roomId || 'unknown';
+    const submittedAt = formatTaipeiDateTime(new Date(adminCase.createdAt));
 
     return `【管理者通知】
 
 來源：實習處 LINE 官方帳號
 類型：人工協助
+案件編號：${adminCase.caseId}
 時間：${submittedAt}
 來源類型：${sourceType}
 來源 ID：${sourceId}
 
 使用者訊息：
-${alertText.slice(0, 3500)}
+${adminCase.alertText.slice(0, 3000)}
 
-請管理者至 LINE 官方帳號後台查看對話。
+若要在群組直接回覆使用者，請輸入：
+#${adminCase.caseId} 回覆內容
+
+案件暫存 72 小時；若 Zeabur 重新部署，暫存案件會失效。
 若涉及學生個案或個人資料，請依正式流程處理。`;
 }
 
-function buildAdminImageAlertText(alertText, source) {
-    const sourceType = source?.type || 'user';
-    const sourceId = source?.userId || source?.groupId || source?.roomId || 'unknown';
+function buildAdminImageAlertText(adminCase, source) {
+    const sourceType = adminCase?.sourceType || source?.type || 'user';
+    const sourceId = adminCase?.sourceId || source?.userId || source?.groupId || source?.roomId || 'unknown';
     const submittedAt = formatTaipeiDateTime(new Date());
+    const caseId = adminCase?.caseId || '未建立';
+    const alertText = adminCase?.alertText || '未提供';
 
     return `【管理者圖片通知】
 
 來源：實習處 LINE 官方帳號
 類型：圖片補充
+案件編號：${caseId}
 時間：${submittedAt}
 來源類型：${sourceType}
 來源 ID：${sourceId}
@@ -387,7 +520,18 @@ function buildAdminImageAlertText(alertText, source) {
 ${alertText.slice(0, 1200)}
 
 使用者剛剛傳送了一張圖片，圖片會在下一則訊息顯示。
+若要在群組直接回覆使用者，請輸入：
+#${caseId} 回覆內容
+
 若涉及學生個案或個人資料，請依正式流程處理。`;
+}
+
+function buildAdminReplyToUserText(caseId, replyText) {
+    return `【實習處管理者回覆】
+
+案件編號：${caseId}
+
+${replyText.slice(0, LINE_TEXT_LIMIT - 80)}`;
 }
 
 function formatTaipeiDateTime(date) {
@@ -401,6 +545,21 @@ function formatTaipeiDateTime(date) {
         second: '2-digit',
         hour12: false
     }).format(date);
+}
+
+function getTaipeiDateCompact(date) {
+    const parts = new Intl.DateTimeFormat('zh-TW', {
+        timeZone: 'Asia/Taipei',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    }).formatToParts(date);
+
+    const year = parts.find((part) => part.type === 'year')?.value || '0000';
+    const month = parts.find((part) => part.type === 'month')?.value || '00';
+    const day = parts.find((part) => part.type === 'day')?.value || '00';
+
+    return `${year}${month}${day}`;
 }
 
 async function replyLineText(replyToken, text) {
