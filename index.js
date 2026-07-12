@@ -26,6 +26,7 @@ const LINE_REPLY_API_URL = 'https://api.line.me/v2/bot/message/reply';
 const LINE_PUSH_API_URL = 'https://api.line.me/v2/bot/message/push';
 const LINE_LOADING_API_URL = 'https://api.line.me/v2/bot/chat/loading/start';
 const LINE_BROADCAST_API_URL = 'https://api.line.me/v2/bot/message/broadcast';
+const LINE_MESSAGING_API_BASE_URL = 'https://api.line.me/v2/bot';
 const LINE_CONTENT_API_BASE_URL = 'https://api-data.line.me/v2/bot/message';
 const CLOUDINARY_UPLOAD_FOLDER = 'line-remote-publisher';
 const REMOTE_DRAFT_TTL_MS = 6 * 60 * 60 * 1000;
@@ -229,7 +230,8 @@ async function handleAdminAlert(userMessage, replyToken, source) {
             return;
         }
 
-        const adminCase = createAdminCase(alertText, source);
+        const requesterProfile = await getLineSourceProfile(source);
+        const adminCase = createAdminCase(alertText, source, requesterProfile);
 
         await axios.post(LINE_PUSH_API_URL, {
             to: ADMIN_LINE_TARGET_ID,
@@ -375,7 +377,7 @@ function parseAdminCaseReply(text) {
     };
 }
 
-function createAdminCase(alertText, source) {
+function createAdminCase(alertText, source, requesterProfile = null) {
     cleanupAdminCases();
 
     const caseId = generateAdminCaseId();
@@ -383,6 +385,7 @@ function createAdminCase(alertText, source) {
         caseId,
         alertText,
         userId: source?.userId,
+        requesterDisplayName: requesterProfile?.displayName || '未取得',
         sourceType: source?.type || 'user',
         sourceId: source?.userId || source?.groupId || source?.roomId || 'unknown',
         createdAt: Date.now(),
@@ -392,6 +395,35 @@ function createAdminCase(alertText, source) {
 
     adminCases.set(caseId, adminCase);
     return adminCase;
+}
+
+async function getLineSourceProfile(source) {
+    if (!source?.userId) {
+        return null;
+    }
+
+    try {
+        let profileUrl = `${LINE_MESSAGING_API_BASE_URL}/profile/${source.userId}`;
+
+        if (source.type === 'group' && source.groupId) {
+            profileUrl = `${LINE_MESSAGING_API_BASE_URL}/group/${source.groupId}/member/${source.userId}`;
+        }
+
+        if (source.type === 'room' && source.roomId) {
+            profileUrl = `${LINE_MESSAGING_API_BASE_URL}/room/${source.roomId}/member/${source.userId}`;
+        }
+
+        const response = await axios.get(profileUrl, {
+            headers: lineHeaders()
+        });
+
+        return {
+            displayName: response.data?.displayName || '未取得'
+        };
+    } catch (error) {
+        console.error('ADMIN_PROFILE_LOOKUP_ERROR', error.response?.data || error.message);
+        return null;
+    }
 }
 
 function generateAdminCaseId() {
@@ -479,6 +511,7 @@ function extractAdminAlertText(text) {
 function buildAdminAlertText(adminCase, source) {
     const sourceType = adminCase.sourceType || source?.type || 'user';
     const sourceId = adminCase.sourceId || source?.userId || source?.groupId || source?.roomId || 'unknown';
+    const requesterDisplayName = adminCase.requesterDisplayName || '未取得';
     const submittedAt = formatTaipeiDateTime(new Date(adminCase.createdAt));
 
     return `【管理者通知】
@@ -487,6 +520,7 @@ function buildAdminAlertText(adminCase, source) {
 類型：人工協助
 案件編號：${adminCase.caseId}
 時間：${submittedAt}
+發問者暱稱：${requesterDisplayName}
 來源類型：${sourceType}
 來源 ID：${sourceId}
 
@@ -503,6 +537,7 @@ ${adminCase.alertText.slice(0, 3000)}
 function buildAdminImageAlertText(adminCase, source) {
     const sourceType = adminCase?.sourceType || source?.type || 'user';
     const sourceId = adminCase?.sourceId || source?.userId || source?.groupId || source?.roomId || 'unknown';
+    const requesterDisplayName = adminCase?.requesterDisplayName || '未取得';
     const submittedAt = formatTaipeiDateTime(new Date());
     const caseId = adminCase?.caseId || '未建立';
     const alertText = adminCase?.alertText || '未提供';
@@ -513,6 +548,7 @@ function buildAdminImageAlertText(adminCase, source) {
 類型：圖片補充
 案件編號：${caseId}
 時間：${submittedAt}
+發問者暱稱：${requesterDisplayName}
 來源類型：${sourceType}
 來源 ID：${sourceId}
 
