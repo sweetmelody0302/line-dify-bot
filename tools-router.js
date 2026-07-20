@@ -252,7 +252,13 @@ function createToolsRouter(options = {}) {
                 ? externalError.message.slice(0, 300)
                 : null;
             const status = externalStatus === 404 ? 404 : 502;
-            console.error('TOOLS_API_ERROR', error.code || error.message, externalStatus || '', externalCode || '');
+            console.error(
+                'TOOLS_API_ERROR',
+                error.code || error.message,
+                externalStatus || '',
+                externalCode || '',
+                externalMessage || ''
+            );
             return sendError(res, status, 'EXTERNAL_API_ERROR', '外部資料服務暫時無法使用，請稍後再試。', {
                 provider_status: externalStatus || null,
                 provider_code: externalCode,
