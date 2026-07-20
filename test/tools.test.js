@@ -40,8 +40,15 @@ function createFakeHttp() {
                 googlePlacesRequestCount += 1;
                 lastGooglePlacesBody = body;
                 lastGooglePlacesUrl = url;
+                const requestedHealthcareTypes = body.includedPrimaryTypes || [];
+                const isHealthcareRequest = requestedHealthcareTypes.length > 0 || /診所|醫師|醫院|醫療中心|藥局|藥房/.test(body.textQuery || '');
+                const defaultHealthcareType = requestedHealthcareTypes[0] || 'medical_clinic';
                 const places = Array.from({ length: url.includes('searchNearby') ? 7 : 1 }, (_, index) => ({
-                    id: `place-${index + 1}`, displayName: { text: `測試餐廳 ${index + 1}` }, primaryTypeDisplayName: { text: '餐廳' },
+                    id: `place-${index + 1}`,
+                    displayName: { text: isHealthcareRequest ? (index === 1 ? '測試美容院' : `測試診所 ${index + 1}`) : `測試餐廳 ${index + 1}` },
+                    primaryTypeDisplayName: { text: isHealthcareRequest && index === 1 ? '美容院' : (isHealthcareRequest ? '診所' : '餐廳') },
+                    primaryType: isHealthcareRequest && index === 1 ? 'beauty_salon' : (isHealthcareRequest ? defaultHealthcareType : 'restaurant'),
+                    types: isHealthcareRequest && index === 1 ? ['beauty_salon', 'establishment'] : [isHealthcareRequest ? defaultHealthcareType : 'restaurant', 'establishment'],
                     formattedAddress: `桃園市${index % 2 === 0 ? '龜山區' : '桃園區'}測試路 ${index + 1} 號`, location: { latitude: 24.989 + index * 0.001, longitude: 121.341 },
                     rating: 4.8 - index * 0.1, currentOpeningHours: { openNow: index !== 1 }, googleMapsUri: 'https://maps.google.com/'
                 }));
@@ -210,7 +217,7 @@ test('healthcare API returns nearby clinics with safety notices', async () => {
     assert.match(body.safety_notice, /119/);
     assert.match(body.privacy_notice, /不應永久保存/);
     assert.match(lastGooglePlacesUrl, /places:searchNearby$/);
-    assert.deepEqual(lastGooglePlacesBody.includedTypes, ['medical_clinic', 'doctor']);
+    assert.deepEqual(lastGooglePlacesBody.includedPrimaryTypes, ['medical_clinic', 'doctor', 'dental_clinic', 'dentist']);
     assert.equal(lastGooglePlacesBody.locationRestriction.circle.radius, 5000);
     assert.equal(lastGooglePlacesBody.rankPreference, 'DISTANCE');
 });
@@ -234,11 +241,20 @@ test('healthcare API validates type and location before calling Google Places', 
 test('healthcare API maps hospital and pharmacy to supported Google place types', async () => {
     const hospital = await request('/api/tools/healthcare?type=hospital&latitude=25&longitude=121');
     assert.equal(hospital.status, 200);
-    assert.deepEqual(lastGooglePlacesBody.includedTypes, ['hospital', 'general_hospital', 'medical_center']);
+    assert.deepEqual(lastGooglePlacesBody.includedPrimaryTypes, ['hospital', 'general_hospital', 'medical_center']);
 
     const pharmacy = await request('/api/tools/healthcare?type=pharmacy&latitude=25&longitude=121');
     assert.equal(pharmacy.status, 200);
-    assert.deepEqual(lastGooglePlacesBody.includedTypes, ['pharmacy', 'drugstore']);
+    assert.deepEqual(lastGooglePlacesBody.includedPrimaryTypes, ['pharmacy', 'drugstore']);
+});
+
+test('healthcare API excludes non-medical primary place types', async () => {
+    const response = await request('/api/tools/healthcare?type=clinic&latitude=25&longitude=121&limit=5');
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.results.length, 5);
+    assert.ok(body.results.every((place) => place.name !== '測試美容院'));
+    assert.ok(body.results.every((place) => place.category !== '美容院'));
 });
 
 test('healthcare API only filters by district when explicitly requested', async () => {
@@ -267,4 +283,7 @@ test('OpenAPI document is public and contains all Dify operation IDs', async () 
     ]);
     const districtParameter = body.paths['/api/tools/healthcare'].get.parameters.find((parameter) => parameter.name === 'district');
     assert.equal(districtParameter.schema.maxLength, 20);
+    const openNowParameter = body.paths['/api/tools/healthcare'].get.parameters.find((parameter) => parameter.name === 'open_now');
+    assert.match(openNowParameter.description, /目前營業中/);
+    assert.match(body.paths['/api/tools/healthcare'].get.description, /open_now=true/);
 });

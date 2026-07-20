@@ -21,9 +21,9 @@ const SUPPORTED_LANGUAGES = new Set([
 ]);
 const DIETARY_VALUES = new Set(['vegetarian', 'vegan', 'halal', 'no_pork', 'no_beef', 'allergy']);
 const HEALTHCARE_TYPES = {
-    clinic: { includedTypes: ['medical_clinic', 'doctor'], keyword: '診所 醫師' },
-    hospital: { includedTypes: ['hospital', 'general_hospital', 'medical_center'], keyword: '醫院 醫療中心' },
-    pharmacy: { includedTypes: ['pharmacy', 'drugstore'], keyword: '藥局 藥房' }
+    clinic: { primaryTypes: ['medical_clinic', 'doctor', 'dental_clinic', 'dentist'], keyword: '診所 醫師' },
+    hospital: { primaryTypes: ['hospital', 'general_hospital', 'medical_center'], keyword: '醫院 醫療中心' },
+    pharmacy: { primaryTypes: ['pharmacy', 'drugstore'], keyword: '藥局 藥房' }
 };
 const SCHOOL_ADDRESS = '333 桃園市龜山區新興里明德路162巷100號';
 const SCHOOL_LOCATION = { latitude: 24.98907, longitude: 121.34097 };
@@ -313,7 +313,7 @@ function createToolsRouter(options = {}) {
         const textQuery = [location, '附近', keyword, healthcareType.keyword].filter(Boolean).join(' ');
         const body = useNearbySearch
             ? {
-                includedTypes: healthcareType.includedTypes,
+                includedPrimaryTypes: healthcareType.primaryTypes,
                 maxResultCount: 20,
                 locationRestriction: { circle: { center: searchCenter, radius: 5000 } },
                 rankPreference: 'DISTANCE',
@@ -334,13 +334,14 @@ function createToolsRouter(options = {}) {
             {
                 headers: {
                     'X-Goog-Api-Key': env.GOOGLE_MAPS_API_KEY,
-                    'X-Goog-FieldMask': 'places.id,places.displayName,places.primaryTypeDisplayName,places.formattedAddress,places.location,places.rating,places.currentOpeningHours.openNow,places.googleMapsUri'
+                    'X-Goog-FieldMask': 'places.id,places.displayName,places.primaryType,places.types,places.primaryTypeDisplayName,places.formattedAddress,places.location,places.rating,places.currentOpeningHours.openNow,places.googleMapsUri'
                 },
                 timeout: timeoutFromEnv(env)
             }
         );
 
         const places = (response.data?.places || [])
+            .filter((place) => healthcareType.primaryTypes.includes(place.primaryType))
             .filter((place) => openNow !== true || place.currentOpeningHours?.openNow === true)
             .filter((place) => !district || place.formattedAddress?.includes(district))
             .map((place) => ({
@@ -730,12 +731,12 @@ function buildOpenApiDocument(serverUrl) {
                 { name: 'dietary', in: 'query', schema: { type: 'string', enum: [...DIETARY_VALUES] } },
                 { name: 'open_now', in: 'query', schema: { type: 'boolean' } }, parameters.language
             ]) },
-            '/api/tools/healthcare': { get: operation('search_nearby_healthcare', '搜尋附近診所、醫院或藥局', '只提供醫療場所位置資訊，不提供診斷、處方或用藥建議。只有使用者明確指定行政區時才傳入 district；否則依實際距離排序。緊急狀況請立即撥打 119。', [
+            '/api/tools/healthcare': { get: operation('search_nearby_healthcare', '搜尋附近診所、醫院或藥局', '只提供醫療場所位置資訊，不提供診斷、處方或用藥建議。使用者要求「目前營業中」、「現在有開」或 open now 時，必須傳入 open_now=true。只有使用者明確指定行政區時才傳入 district；否則依實際距離排序。緊急狀況請立即撥打 119。', [
                 { name: 'type', in: 'query', required: true, schema: { type: 'string', enum: Object.keys(HEALTHCARE_TYPES) } },
                 { name: 'location', in: 'query', schema: { type: 'string', maxLength: 100 } }, parameters.latitude, parameters.longitude,
                 { name: 'district', in: 'query', description: '使用者明確要求限定的行政區，例如龜山區。不可根據地址自動填入。', schema: { type: 'string', maxLength: 20 } },
                 { name: 'keyword', in: 'query', schema: { type: 'string', maxLength: 60 } },
-                { name: 'open_now', in: 'query', schema: { type: 'boolean' } }, parameters.language,
+                { name: 'open_now', in: 'query', description: '使用者要求目前營業中、現在有開或 open now 時必須設為 true；未要求時不要自行設定。', schema: { type: 'boolean' } }, parameters.language,
                 { name: 'limit', in: 'query', schema: { type: 'integer', default: 5, minimum: 1, maximum: 5 } }
             ]) },
             '/api/tools/news': { get: operation('search_taiwan_news', '搜尋臺灣新聞（第一階段由 Dify Web Search 執行）', '此端點第一階段不執行搜尋；Agent 應改用 Dify Marketplace 合法 Web Search 工具。', [
