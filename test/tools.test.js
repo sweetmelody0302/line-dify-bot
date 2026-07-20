@@ -148,6 +148,38 @@ test('food API enforces the configured Google Places daily limit', async () => {
     }
 });
 
+test('food API safely reports Google Places request errors', async () => {
+    const externalError = new Error('Request failed with status code 400');
+    externalError.status = 400;
+    externalError.code = 'ERR_BAD_REQUEST';
+    externalError.response = {
+        status: 400,
+        data: { error: { code: 400, status: 'INVALID_ARGUMENT', message: 'Invalid request field.' } }
+    };
+    const app = express();
+    app.use('/api/tools', createToolsRouter({
+        env: TEST_ENV,
+        http: { post: async () => { throw externalError; } },
+        now: () => new Date('2026-07-19T04:34:56.000Z')
+    }));
+    const errorServer = await new Promise((resolve) => {
+        const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+    });
+    try {
+        const response = await fetch(`http://127.0.0.1:${errorServer.address().port}/api/tools/food?location=Taoyuan`, {
+            headers: { 'X-Tools-Key': TEST_ENV.TOOLS_API_KEY }
+        });
+        const body = await response.json();
+        assert.equal(response.status, 502);
+        assert.equal(body.error.code, 'EXTERNAL_API_ERROR');
+        assert.equal(body.error.details.provider_status, 400);
+        assert.equal(body.error.details.provider_code, 'INVALID_ARGUMENT');
+        assert.equal(body.error.details.provider_message, 'Invalid request field.');
+    } finally {
+        await new Promise((resolve) => errorServer.close(resolve));
+    }
+});
+
 test('OpenAPI document is public and contains all Dify operation IDs', async () => {
     const response = await request('/api/tools/openapi.json', false);
     const body = await response.json();

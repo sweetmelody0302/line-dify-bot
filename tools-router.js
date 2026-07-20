@@ -244,13 +244,26 @@ function createToolsRouter(options = {}) {
     }));
 
     router.use((error, req, res, next) => {
+        if (error.response) {
+            const externalStatus = error.response.status;
+            const externalError = error.response.data?.error;
+            const externalCode = externalError?.status || externalError?.code || null;
+            const externalMessage = typeof externalError?.message === 'string'
+                ? externalError.message.slice(0, 300)
+                : null;
+            const status = externalStatus === 404 ? 404 : 502;
+            console.error('TOOLS_API_ERROR', error.code || error.message, externalStatus || '', externalCode || '');
+            return sendError(res, status, 'EXTERNAL_API_ERROR', '外部資料服務暫時無法使用，請稍後再試。', {
+                provider_status: externalStatus || null,
+                provider_code: externalCode,
+                provider_message: externalMessage
+            });
+        }
         if (error && error.status) {
             return sendError(res, error.status, error.code, error.message, error.details);
         }
-        const externalStatus = error.response?.status;
-        const status = externalStatus === 404 ? 404 : 502;
-        console.error('TOOLS_API_ERROR', error.code || error.message, externalStatus || '');
-        return sendError(res, status, 'EXTERNAL_API_ERROR', '外部資料服務暫時無法使用，請稍後再試。');
+        console.error('TOOLS_API_ERROR', error.code || error.message);
+        return sendError(res, 502, 'EXTERNAL_API_ERROR', '外部資料服務暫時無法使用，請稍後再試。');
     });
 
     return router;
