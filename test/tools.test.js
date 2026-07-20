@@ -12,6 +12,7 @@ const TEST_ENV = {
 };
 let googlePlacesRequestCount = 0;
 let lastGooglePlacesBody = null;
+let lastGooglePlacesUrl = null;
 
 function createFakeHttp() {
     return {
@@ -38,11 +39,13 @@ function createFakeHttp() {
             if (url.includes('places.googleapis.com')) {
                 googlePlacesRequestCount += 1;
                 lastGooglePlacesBody = body;
-                return { data: { places: [{
-                    id: 'place-1', displayName: { text: '測試餐廳' }, primaryTypeDisplayName: { text: '餐廳' },
-                    formattedAddress: '桃園市測試路 1 號', location: { latitude: 25.01, longitude: 121.01 },
-                    rating: 4.5, currentOpeningHours: { openNow: true }, googleMapsUri: 'https://maps.google.com/'
-                }] } };
+                lastGooglePlacesUrl = url;
+                const places = Array.from({ length: url.includes('searchNearby') ? 7 : 1 }, (_, index) => ({
+                    id: `place-${index + 1}`, displayName: { text: `測試餐廳 ${index + 1}` }, primaryTypeDisplayName: { text: '餐廳' },
+                    formattedAddress: `桃園市測試路 ${index + 1} 號`, location: { latitude: 24.989 + index * 0.001, longitude: 121.341 },
+                    rating: 4.8 - index * 0.1, currentOpeningHours: { openNow: index !== 1 }, googleMapsUri: 'https://maps.google.com/'
+                }));
+                return { data: { places } };
             }
             throw new Error(`Unexpected POST ${url}`);
         }
@@ -111,7 +114,7 @@ test('food API returns at most five results and rejects missing location', async
     const body = await valid.json();
     assert.equal(valid.status, 200);
     assert.equal(body.results.length, 1);
-    assert.equal(body.results[0].name, '測試餐廳');
+    assert.equal(body.results[0].name, '測試餐廳 1');
 
     const invalid = await request('/api/tools/food');
     assert.equal(invalid.status, 400);
@@ -119,10 +122,16 @@ test('food API returns at most five results and rejects missing location', async
 });
 
 test('food API resolves the school name to its full address', async () => {
-    const response = await request('/api/tools/food?location=%E4%B8%96%E7%B4%80%E7%B6%A0%E8%83%BD%E5%B7%A5%E5%95%86');
+    const response = await request('/api/tools/food?location=%E4%B8%96%E7%B4%80%E7%B6%A0%E8%83%BD%E5%B7%A5%E5%95%86&open_now=true');
+    const body = await response.json();
     assert.equal(response.status, 200);
-    assert.match(lastGooglePlacesBody.textQuery, /333 桃園市龜山區新興里明德路162巷100號 附近/);
-    assert.doesNotMatch(lastGooglePlacesBody.textQuery, /世紀綠能工商/);
+    assert.match(lastGooglePlacesUrl, /places:searchNearby$/);
+    assert.deepEqual(lastGooglePlacesBody.locationRestriction.circle.center, { latitude: 24.98907, longitude: 121.34097 });
+    assert.equal(lastGooglePlacesBody.locationRestriction.circle.radius, 2500);
+    assert.equal(lastGooglePlacesBody.maxResultCount, 20);
+    assert.equal(body.results.length, 5);
+    assert.ok(body.results.every((place) => place.open_now === true));
+    assert.ok(body.results.every((place) => Number.isInteger(place.distance)));
 });
 
 test('food API does not cache Google Places content', async () => {

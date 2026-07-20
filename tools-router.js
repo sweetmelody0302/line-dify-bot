@@ -21,6 +21,7 @@ const SUPPORTED_LANGUAGES = new Set([
 ]);
 const DIETARY_VALUES = new Set(['vegetarian', 'vegan', 'halal', 'no_pork', 'no_beef', 'allergy']);
 const SCHOOL_ADDRESS = '333 桃園市龜山區新興里明德路162巷100號';
+const SCHOOL_LOCATION = { latitude: 24.98907, longitude: 121.34097 };
 
 function createToolsRouter(options = {}) {
     const router = express.Router();
@@ -184,6 +185,7 @@ function createToolsRouter(options = {}) {
 
     router.get('/food', asyncHandler(async (req, res) => {
         const requestedLocation = optionalText(req.query.location, 'location', 100);
+        const knownSchoolLocation = isKnownSchoolLocation(requestedLocation);
         const location = normalizeKnownLocation(requestedLocation);
         const latitude = optionalCoordinate(req.query.latitude, 'latitude', -90, 90);
         const longitude = optionalCoordinate(req.query.longitude, 'longitude', -180, 180);
@@ -204,26 +206,63 @@ function createToolsRouter(options = {}) {
         requireEnv(env, ['GOOGLE_MAPS_API_KEY']);
         enforcePlacesUsageLimit(placesUsage, env, now());
 
+        const searchCenter = latitude !== null
+            ? { latitude, longitude }
+            : (knownSchoolLocation ? SCHOOL_LOCATION : null);
+        const useNearbySearch = searchCenter && !keyword && !dietary;
         const textQuery = [location, '附近', keyword || '餐廳 美食', dietaryKeyword(dietary), budget].filter(Boolean).join(' ');
-        const body = { textQuery, pageSize: 5, languageCode: googleLanguage(language), regionCode: 'TW' };
-        if (openNow !== null) body.openNow = openNow;
-        if (latitude !== null) {
+        const body = useNearbySearch
+            ? {
+                includedTypes: ['restaurant', 'cafe'],
+                maxResultCount: 20,
+                locationRestriction: { circle: { center: searchCenter, radius: 2500 } },
+                rankPreference: 'POPULARITY',
+                languageCode: googleLanguage(language),
+                regionCode: 'TW'
+            }
+            : { textQuery, pageSize: 5, languageCode: googleLanguage(language), regionCode: 'TW' };
+        if (!useNearbySearch && openNow !== null) body.openNow = openNow;
+        if (!useNearbySearch && latitude !== null) {
             body.locationBias = { circle: { center: { latitude, longitude }, radius: 3000 } };
         }
 
-        const response = await http.post('https://places.googleapis.com/v1/places:searchText', body, {
+        const response = await http.post(
+            useNearbySearch
+                ? 'https://places.googleapis.com/v1/places:searchNearby'
+                : 'https://places.googleapis.com/v1/places:searchText',
+            body,
+            {
             headers: {
                 'X-Goog-Api-Key': env.GOOGLE_MAPS_API_KEY,
                 'X-Goog-FieldMask': 'places.id,places.displayName,places.primaryTypeDisplayName,places.formattedAddress,places.location,places.rating,places.currentOpeningHours.openNow,places.googleMapsUri'
             },
             timeout: timeoutFromEnv(env)
-        });
+            }
+        );
+        const resultOrigin = searchCenter;
+        const places = (response.data?.places || [])
+            .filter((place) => openNow !== true || place.currentOpeningHours?.openNow === true)
+            .map((place) => ({
+                place,
+                distance: !resultOrigin || !place.location ? null : Math.round(haversineMeters(
+                    resultOrigin.latitude,
+                    resultOrigin.longitude,
+                    place.location.latitude,
+                    place.location.longitude
+                ))
+            }))
+            .sort((a, b) => {
+                const ratingDifference = (b.place.rating ?? 0) - (a.place.rating ?? 0);
+                if (ratingDifference !== 0) return ratingDifference;
+                return (a.distance ?? Number.MAX_SAFE_INTEGER) - (b.distance ?? Number.MAX_SAFE_INTEGER);
+            })
+            .slice(0, 5);
         const result = {
-            results: (response.data?.places || []).slice(0, 5).map((place) => ({
+            results: places.map(({ place, distance }) => ({
                 name: place.displayName?.text || null,
                 category: place.primaryTypeDisplayName?.text || null,
                 address: place.formattedAddress || null,
-                distance: latitude === null || !place.location ? null : Math.round(haversineMeters(latitude, longitude, place.location.latitude, place.location.longitude)),
+                distance,
                 rating: place.rating ?? null,
                 open_now: place.currentOpeningHours?.openNow ?? null,
                 maps_url: place.googleMapsUri || (place.id ? `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(place.id)}` : null),
@@ -409,7 +448,12 @@ function stableKey(prefix, values) {
 
 function normalizeKnownLocation(location) {
     if (!location) return null;
-    return /世紀綠能工商(?:實習處)?/.test(location) ? SCHOOL_ADDRESS : location;
+    return isKnownSchoolLocation(location) ? SCHOOL_ADDRESS : location;
+}
+
+function isKnownSchoolLocation(location) {
+    if (!location) return false;
+    return location === SCHOOL_ADDRESS || /世紀綠能工商(?:實習處)?|本校/.test(location);
 }
 
 function getCached(cache, key) {
