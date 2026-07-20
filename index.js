@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
 const { StringDecoder } = require('string_decoder');
+const { createToolsRouter } = require('./tools-router');
 
 const app = express();
 app.use(express.json({
@@ -38,7 +39,11 @@ const FRIENDLY_REPLY_EMOJI = ['😊', '📌', '✅', '🔎', '📝', '📢', '�
 const remoteDrafts = new Map();
 const adminImageHandoffs = new Map();
 const adminCases = new Map();
+const pendingLocationRequests = new Map();
 let adminCaseSequence = 0;
+const LOCATION_REQUEST_TTL_MS = 10 * 60 * 1000;
+
+app.use('/api/tools', createToolsRouter());
 
 const FOLLOW_WELCOME_MESSAGES = [
     {
@@ -177,8 +182,34 @@ app.post('/webhook', async (req, res) => {
                     continue;
                 }
 
+                if (isLocationToolRequest(userMessage)) {
+                    rememberLocationRequest(event.source, userMessage);
+                    replyLocationQuickReply(replyToken);
+                    continue;
+                }
+
+                if (isManualLocationCommand(userMessage)) {
+                    if (markManualLocationRequest(event.source)) {
+                        replyLineText(replyToken, '請直接輸入您要查詢的地點，例如：\n桃園市龜山區文化一路\n\n我會將地點交給 AI 助理進行這次查詢。📍');
+                    } else {
+                        replyLineText(replyToken, '請先輸入「附近美食」或「附近公車站」，再選擇手動輸入地點。📍');
+                    }
+                    continue;
+                }
+
+                const pendingLocation = takePendingLocationRequest(event.source);
+                if (pendingLocation?.awaitingManualLocation) {
+                    handleMessage(`${pendingLocation.query}\n\n使用者手動輸入地點：${userMessage}`, replyToken, userId);
+                    continue;
+                }
+
                 // 啟動大腦思考流程
                 handleMessage(userMessage, replyToken, userId);
+            }
+
+            if (event.type === 'message' && event.message && event.message.type === 'location') {
+                handleLocationMessage(event);
+                continue;
             }
 
             if (event.type === 'message' && event.message && event.message.type === 'image') {
@@ -608,6 +639,94 @@ async function replyLineText(replyToken, text) {
     }, {
         headers: lineHeaders()
     });
+}
+
+function isLocationToolRequest(text) {
+    const normalized = (text || '').trim().toLowerCase();
+    return /(附近|鄰近).*(美食|餐廳|吃|公車|巴士|站牌)|nearby\s+(food|restaurant|bus|stop)/i.test(normalized);
+}
+
+function isManualLocationCommand(text) {
+    return (text || '').trim() === '手動輸入地點';
+}
+
+function locationRequestKey(source) {
+    return source?.userId || source?.groupId || source?.roomId || null;
+}
+
+function rememberLocationRequest(source, query) {
+    cleanupLocationRequests();
+    const key = locationRequestKey(source);
+    if (!key) return;
+    pendingLocationRequests.set(key, {
+        query,
+        awaitingManualLocation: false,
+        expiresAt: Date.now() + LOCATION_REQUEST_TTL_MS
+    });
+}
+
+function takePendingLocationRequest(source) {
+    cleanupLocationRequests();
+    const key = locationRequestKey(source);
+    if (!key) return null;
+    const pending = pendingLocationRequests.get(key);
+    if (!pending) return null;
+    pendingLocationRequests.delete(key);
+    return pending;
+}
+
+function markManualLocationRequest(source) {
+    cleanupLocationRequests();
+    const key = locationRequestKey(source);
+    const pending = key ? pendingLocationRequests.get(key) : null;
+    if (pending) {
+        pending.awaitingManualLocation = true;
+        pending.expiresAt = Date.now() + LOCATION_REQUEST_TTL_MS;
+        return true;
+    }
+    return false;
+}
+
+function cleanupLocationRequests() {
+    const currentTime = Date.now();
+    for (const [key, value] of pendingLocationRequests.entries()) {
+        if (value.expiresAt <= currentTime) pendingLocationRequests.delete(key);
+    }
+}
+
+async function replyLocationQuickReply(replyToken) {
+    await axios.post(LINE_REPLY_API_URL, {
+        replyToken,
+        messages: [{
+            type: 'text',
+            text: '這項查詢需要知道您目前的位置。請選擇分享目前位置，或手動輸入地點。📍',
+            quickReply: {
+                items: [
+                    { type: 'action', action: { type: 'location', label: '分享目前位置' } },
+                    { type: 'action', action: { type: 'message', label: '手動輸入地點', text: '手動輸入地點' } }
+                ]
+            }
+        }]
+    }, { headers: lineHeaders() });
+}
+
+async function handleLocationMessage(event) {
+    const pending = takePendingLocationRequest(event.source);
+    if (!pending) {
+        await replyLineText(event.replyToken, '目前沒有等待位置資訊的查詢。請先輸入「附近美食」或「附近公車站」。📍');
+        return;
+    }
+
+    const latitude = Number(event.message.latitude);
+    const longitude = Number(event.message.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        await replyLineText(event.replyToken, '收到的位置格式不正確，請重新分享位置。');
+        return;
+    }
+
+    const address = String(event.message.address || '').slice(0, 200);
+    const locationContext = `使用者已授權本次查詢使用 LINE 位置：latitude=${latitude}, longitude=${longitude}${address ? `, address=${address}` : ''}。精確位置僅限本次查詢，不得在回覆中完整顯示。`;
+    handleMessage(`${pending.query}\n\n${locationContext}`, event.replyToken, event.source?.userId);
 }
 
 // 發文遙控器 Webhook：建立草稿、預覽、確認後廣播到實習處官方帳號
@@ -1076,6 +1195,10 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT}`);
+    });
+}
+
+module.exports = app;

@@ -4,7 +4,9 @@
   "description": "LINE Bot integrated with Dify",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test --test-concurrency=1",
+    "check": "node --check index.js && node --check tools-router.js"
   },
   "dependencies": {
     "axios": "^1.6.8",
