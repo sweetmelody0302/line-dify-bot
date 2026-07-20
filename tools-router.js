@@ -288,6 +288,7 @@ function createToolsRouter(options = {}) {
         const location = normalizeKnownLocation(requestedLocation);
         const latitude = optionalCoordinate(req.query.latitude, 'latitude', -90, 90);
         const longitude = optionalCoordinate(req.query.longitude, 'longitude', -180, 180);
+        const district = optionalText(req.query.district, 'district', 20);
         const keyword = optionalText(req.query.keyword, 'keyword', 60);
         const openNow = optionalBoolean(req.query.open_now, 'open_now');
         const language = optionalLanguage(req.query.language);
@@ -341,6 +342,7 @@ function createToolsRouter(options = {}) {
 
         const places = (response.data?.places || [])
             .filter((place) => openNow !== true || place.currentOpeningHours?.openNow === true)
+            .filter((place) => !district || place.formattedAddress?.includes(district))
             .map((place) => ({
                 place,
                 distance: !searchCenter || !place.location ? null : Math.round(haversineMeters(
@@ -360,6 +362,7 @@ function createToolsRouter(options = {}) {
         const updatedAt = now().toISOString();
         res.json({
             query_type: type,
+            queried_district: district,
             results: places.map(({ place, distance }) => ({
                 name: place.displayName?.text || null,
                 category: place.primaryTypeDisplayName?.text || null,
@@ -727,9 +730,10 @@ function buildOpenApiDocument(serverUrl) {
                 { name: 'dietary', in: 'query', schema: { type: 'string', enum: [...DIETARY_VALUES] } },
                 { name: 'open_now', in: 'query', schema: { type: 'boolean' } }, parameters.language
             ]) },
-            '/api/tools/healthcare': { get: operation('search_nearby_healthcare', '搜尋附近診所、醫院或藥局', '只提供醫療場所位置資訊，不提供診斷、處方或用藥建議。需要附近結果時應提供使用者授權的位置；緊急狀況請立即撥打 119。', [
+            '/api/tools/healthcare': { get: operation('search_nearby_healthcare', '搜尋附近診所、醫院或藥局', '只提供醫療場所位置資訊，不提供診斷、處方或用藥建議。只有使用者明確指定行政區時才傳入 district；否則依實際距離排序。緊急狀況請立即撥打 119。', [
                 { name: 'type', in: 'query', required: true, schema: { type: 'string', enum: Object.keys(HEALTHCARE_TYPES) } },
                 { name: 'location', in: 'query', schema: { type: 'string', maxLength: 100 } }, parameters.latitude, parameters.longitude,
+                { name: 'district', in: 'query', description: '使用者明確要求限定的行政區，例如龜山區。不可根據地址自動填入。', schema: { type: 'string', maxLength: 20 } },
                 { name: 'keyword', in: 'query', schema: { type: 'string', maxLength: 60 } },
                 { name: 'open_now', in: 'query', schema: { type: 'boolean' } }, parameters.language,
                 { name: 'limit', in: 'query', schema: { type: 'integer', default: 5, minimum: 1, maximum: 5 } }

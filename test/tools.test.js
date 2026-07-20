@@ -42,7 +42,7 @@ function createFakeHttp() {
                 lastGooglePlacesUrl = url;
                 const places = Array.from({ length: url.includes('searchNearby') ? 7 : 1 }, (_, index) => ({
                     id: `place-${index + 1}`, displayName: { text: `測試餐廳 ${index + 1}` }, primaryTypeDisplayName: { text: '餐廳' },
-                    formattedAddress: `桃園市測試路 ${index + 1} 號`, location: { latitude: 24.989 + index * 0.001, longitude: 121.341 },
+                    formattedAddress: `桃園市${index % 2 === 0 ? '龜山區' : '桃園區'}測試路 ${index + 1} 號`, location: { latitude: 24.989 + index * 0.001, longitude: 121.341 },
                     rating: 4.8 - index * 0.1, currentOpeningHours: { openNow: index !== 1 }, googleMapsUri: 'https://maps.google.com/'
                 }));
                 return { data: { places } };
@@ -241,6 +241,21 @@ test('healthcare API maps hospital and pharmacy to supported Google place types'
     assert.deepEqual(lastGooglePlacesBody.includedTypes, ['pharmacy', 'drugstore']);
 });
 
+test('healthcare API only filters by district when explicitly requested', async () => {
+    const unrestricted = await request('/api/tools/healthcare?type=clinic&latitude=25&longitude=121&limit=5');
+    const unrestrictedBody = await unrestricted.json();
+    assert.equal(unrestricted.status, 200);
+    assert.equal(unrestrictedBody.queried_district, null);
+    assert.equal(unrestrictedBody.results.length, 5);
+
+    const restricted = await request('/api/tools/healthcare?type=clinic&latitude=25&longitude=121&district=%E9%BE%9C%E5%B1%B1%E5%8D%80&limit=5');
+    const restrictedBody = await restricted.json();
+    assert.equal(restricted.status, 200);
+    assert.equal(restrictedBody.queried_district, '龜山區');
+    assert.ok(restrictedBody.results.length > 0);
+    assert.ok(restrictedBody.results.every((place) => place.address.includes('龜山區')));
+});
+
 test('OpenAPI document is public and contains all Dify operation IDs', async () => {
     const response = await request('/api/tools/openapi.json', false);
     const body = await response.json();
@@ -250,4 +265,6 @@ test('OpenAPI document is public and contains all Dify operation IDs', async () 
         'get_taiwan_time', 'get_taiwan_weather', 'search_taiwan_bus', 'search_nearby_food',
         'search_nearby_healthcare', 'search_taiwan_news'
     ]);
+    const districtParameter = body.paths['/api/tools/healthcare'].get.parameters.find((parameter) => parameter.name === 'district');
+    assert.equal(districtParameter.schema.maxLength, 20);
 });
