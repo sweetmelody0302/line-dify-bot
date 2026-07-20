@@ -20,6 +20,7 @@ const SUPPORTED_LANGUAGES = new Set([
     'zh-TW', 'en', 'ja', 'vi', 'th', 'my', 'id', 'lo', 'ms'
 ]);
 const DIETARY_VALUES = new Set(['vegetarian', 'vegan', 'halal', 'no_pork', 'no_beef', 'allergy']);
+const SCHOOL_ADDRESS = '333 桃園市龜山區新興里明德路162巷100號';
 
 function createToolsRouter(options = {}) {
     const router = express.Router();
@@ -182,7 +183,8 @@ function createToolsRouter(options = {}) {
     }));
 
     router.get('/food', asyncHandler(async (req, res) => {
-        const location = optionalText(req.query.location, 'location', 100);
+        const requestedLocation = optionalText(req.query.location, 'location', 100);
+        const location = normalizeKnownLocation(requestedLocation);
         const latitude = optionalCoordinate(req.query.latitude, 'latitude', -90, 90);
         const longitude = optionalCoordinate(req.query.longitude, 'longitude', -180, 180);
         const keyword = optionalText(req.query.keyword, 'keyword', 60);
@@ -202,7 +204,7 @@ function createToolsRouter(options = {}) {
         requireEnv(env, ['GOOGLE_MAPS_API_KEY']);
         enforcePlacesUsageLimit(placesUsage, env, now());
 
-        const textQuery = [keyword || '餐廳 美食', dietaryKeyword(dietary), budget, location].filter(Boolean).join(' ');
+        const textQuery = [location, '附近', keyword || '餐廳 美食', dietaryKeyword(dietary), budget].filter(Boolean).join(' ');
         const body = { textQuery, pageSize: 5, languageCode: googleLanguage(language), regionCode: 'TW' };
         if (openNow !== null) body.openNow = openNow;
         if (latitude !== null) {
@@ -403,6 +405,11 @@ function enforcePlacesUsageLimit(usage, env, currentDate) {
 
 function stableKey(prefix, values) {
     return `${prefix}:${crypto.createHash('sha256').update(JSON.stringify(values)).digest('hex')}`;
+}
+
+function normalizeKnownLocation(location) {
+    if (!location) return null;
+    return /世紀綠能工商(?:實習處)?/.test(location) ? SCHOOL_ADDRESS : location;
 }
 
 function getCached(cache, key) {

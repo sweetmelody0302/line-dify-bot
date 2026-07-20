@@ -11,6 +11,7 @@ const TEST_ENV = {
     GOOGLE_MAPS_API_KEY: 'test-google-key'
 };
 let googlePlacesRequestCount = 0;
+let lastGooglePlacesBody = null;
 
 function createFakeHttp() {
     return {
@@ -32,10 +33,11 @@ function createFakeHttp() {
             if (url.includes('/Bus/Station/NearBy')) return { data: [{ StationID: 'N1', StationName: { Zh_tw: '附近站' }, Stops: [] }] };
             throw new Error(`Unexpected GET ${url}`);
         },
-        async post(url) {
+        async post(url, body) {
             if (url.includes('/protocol/openid-connect/token')) return { data: { access_token: 'test-token', expires_in: 3600 } };
             if (url.includes('places.googleapis.com')) {
                 googlePlacesRequestCount += 1;
+                lastGooglePlacesBody = body;
                 return { data: { places: [{
                     id: 'place-1', displayName: { text: '測試餐廳' }, primaryTypeDisplayName: { text: '餐廳' },
                     formattedAddress: '桃園市測試路 1 號', location: { latitude: 25.01, longitude: 121.01 },
@@ -114,6 +116,13 @@ test('food API returns at most five results and rejects missing location', async
     const invalid = await request('/api/tools/food');
     assert.equal(invalid.status, 400);
     assert.equal((await invalid.json()).error.code, 'MISSING_LOCATION');
+});
+
+test('food API resolves the school name to its full address', async () => {
+    const response = await request('/api/tools/food?location=%E4%B8%96%E7%B4%80%E7%B6%A0%E8%83%BD%E5%B7%A5%E5%95%86');
+    assert.equal(response.status, 200);
+    assert.match(lastGooglePlacesBody.textQuery, /333 桃園市龜山區新興里明德路162巷100號 附近/);
+    assert.doesNotMatch(lastGooglePlacesBody.textQuery, /世紀綠能工商/);
 });
 
 test('food API does not cache Google Places content', async () => {
