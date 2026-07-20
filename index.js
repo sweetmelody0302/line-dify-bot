@@ -643,7 +643,12 @@ async function replyLineText(replyToken, text) {
 
 function isLocationToolRequest(text) {
     const normalized = (text || '').trim().toLowerCase();
-    return /(附近|鄰近).*(美食|餐廳|吃|公車|巴士|站牌|診所|醫院|藥局|藥房|醫師|醫生)|nearby\s+(food|restaurant|bus|stop|clinic|hospital|pharmacy|doctor)/i.test(normalized);
+    const needsNearbyLocation = /(附近|鄰近).*(美食|餐廳|吃|公車|巴士|站牌|診所|醫院|藥局|藥房|醫師|醫生)|nearby\s+(food|restaurant|bus|stop|clinic|hospital|pharmacy|doctor)/i.test(normalized);
+    return needsNearbyLocation && !hasExplicitLocation(normalized);
+}
+
+function hasExplicitLocation(text) {
+    return /(世紀綠能工商|明德路\s*162\s*巷\s*100\s*號|(?:台|臺)北市|新北市|桃園市|台中市|臺中市|台南市|臺南市|高雄市|[一-鿿]{2,}[縣市][一-鿿]{1,}[區鄉鎮]|[一-鿿]{2,}[路街巷站])/i.test(text || '');
 }
 
 function isManualLocationCommand(text) {

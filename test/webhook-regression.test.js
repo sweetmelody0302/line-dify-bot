@@ -125,3 +125,23 @@ test('nearby healthcare query offers location quick reply and forwards location 
     assert.match(difyCall.body.query, /附近有現在營業的診所嗎/);
     assert.match(difyCall.body.query, /latitude=24\.99, longitude=121\.34/);
 });
+
+test('nearby healthcare query with an explicit location goes directly to Dify', async () => {
+    calls.length = 0;
+    const response = await webhook({ events: [{
+        type: 'message', replyToken: 'explicit-healthcare-token', source: { type: 'user', userId: 'U5' },
+        message: {
+            id: 'M6',
+            type: 'text',
+            text: '請幫我找世紀綠能工商附近的診所，限定龜山區，最多5間'
+        }
+    }] });
+
+    assert.equal(response.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const difyCall = calls.find((call) => call.url.includes('dify.ai/v1/chat-messages'));
+    const lineReply = calls.find((call) => call.body?.replyToken === 'explicit-healthcare-token');
+    assert.ok(difyCall);
+    assert.match(difyCall.body.query, /世紀綠能工商附近的診所/);
+    assert.equal(lineReply.body.messages[0].quickReply, undefined);
+});
