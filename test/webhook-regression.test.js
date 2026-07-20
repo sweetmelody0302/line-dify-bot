@@ -101,3 +101,27 @@ test('nearby query offers LINE location quick reply and uses location once', asy
     const difyCall = calls.find((call) => call.url.includes('dify.ai/v1/chat-messages'));
     assert.match(difyCall.body.query, /latitude=25\.01, longitude=121\.01/);
 });
+
+test('nearby healthcare query offers location quick reply and forwards location to Dify', async () => {
+    calls.length = 0;
+    const quickReplyResponse = await webhook({ events: [{
+        type: 'message', replyToken: 'healthcare-token', source: { type: 'user', userId: 'U4' },
+        message: { id: 'M4', type: 'text', text: '附近有現在營業的診所嗎？' }
+    }] });
+    assert.equal(quickReplyResponse.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const quickReply = calls.find((call) => call.body?.replyToken === 'healthcare-token');
+    assert.equal(quickReply.body.messages[0].quickReply.items[0].action.type, 'location');
+    assert.equal(quickReply.body.messages[0].quickReply.items[1].action.text, '手動輸入地點');
+
+    calls.length = 0;
+    const locationResponse = await webhook({ events: [{
+        type: 'message', replyToken: 'healthcare-location-token', source: { type: 'user', userId: 'U4' },
+        message: { id: 'M5', type: 'location', latitude: 24.99, longitude: 121.34, address: '桃園市測試地址' }
+    }] });
+    assert.equal(locationResponse.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const difyCall = calls.find((call) => call.url.includes('dify.ai/v1/chat-messages'));
+    assert.match(difyCall.body.query, /附近有現在營業的診所嗎/);
+    assert.match(difyCall.body.query, /latitude=24\.99, longitude=121\.34/);
+});

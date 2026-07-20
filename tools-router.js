@@ -20,6 +20,11 @@ const SUPPORTED_LANGUAGES = new Set([
     'zh-TW', 'en', 'ja', 'vi', 'th', 'my', 'id', 'lo', 'ms'
 ]);
 const DIETARY_VALUES = new Set(['vegetarian', 'vegan', 'halal', 'no_pork', 'no_beef', 'allergy']);
+const HEALTHCARE_TYPES = {
+    clinic: { includedTypes: ['medical_clinic', 'doctor'], keyword: '診所 醫師' },
+    hospital: { includedTypes: ['hospital', 'general_hospital', 'medical_center'], keyword: '醫院 醫療中心' },
+    pharmacy: { includedTypes: ['pharmacy', 'drugstore'], keyword: '藥局 藥房' }
+};
 const SCHOOL_ADDRESS = '333 桃園市龜山區新興里明德路162巷100號';
 const SCHOOL_LOCATION = { latitude: 24.98907, longitude: 121.34097 };
 
@@ -276,6 +281,103 @@ function createToolsRouter(options = {}) {
         res.json(result);
     }));
 
+    router.get('/healthcare', asyncHandler(async (req, res) => {
+        const type = optionalEnum(req.query.type, 'type', Object.keys(HEALTHCARE_TYPES));
+        const requestedLocation = optionalText(req.query.location, 'location', 100);
+        const knownSchoolLocation = isKnownSchoolLocation(requestedLocation);
+        const location = normalizeKnownLocation(requestedLocation);
+        const latitude = optionalCoordinate(req.query.latitude, 'latitude', -90, 90);
+        const longitude = optionalCoordinate(req.query.longitude, 'longitude', -180, 180);
+        const keyword = optionalText(req.query.keyword, 'keyword', 60);
+        const openNow = optionalBoolean(req.query.open_now, 'open_now');
+        const language = optionalLanguage(req.query.language);
+        const limit = positiveInteger(req.query.limit, 5, 1, 5);
+
+        if (!type) throw apiError(400, 'MISSING_HEALTHCARE_TYPE', '請提供 type：clinic、hospital 或 pharmacy。');
+        if ((latitude === null) !== (longitude === null)) {
+            throw apiError(400, 'MISSING_COORDINATE', 'latitude 與 longitude 必須一起提供。');
+        }
+        if (!location && latitude === null) {
+            throw apiError(400, 'MISSING_LOCATION', '請提供 location，或同時提供 latitude 與 longitude。');
+        }
+
+        requireEnv(env, ['GOOGLE_MAPS_API_KEY']);
+        enforcePlacesUsageLimit(placesUsage, env, now());
+
+        const healthcareType = HEALTHCARE_TYPES[type];
+        const searchCenter = latitude !== null
+            ? { latitude, longitude }
+            : (knownSchoolLocation ? SCHOOL_LOCATION : null);
+        const useNearbySearch = Boolean(searchCenter && !keyword);
+        const textQuery = [location, '附近', keyword, healthcareType.keyword].filter(Boolean).join(' ');
+        const body = useNearbySearch
+            ? {
+                includedTypes: healthcareType.includedTypes,
+                maxResultCount: 20,
+                locationRestriction: { circle: { center: searchCenter, radius: 5000 } },
+                rankPreference: 'DISTANCE',
+                languageCode: googleLanguage(language),
+                regionCode: 'TW'
+            }
+            : { textQuery, pageSize: 20, languageCode: googleLanguage(language), regionCode: 'TW' };
+        if (!useNearbySearch && openNow !== null) body.openNow = openNow;
+        if (!useNearbySearch && latitude !== null) {
+            body.locationBias = { circle: { center: searchCenter, radius: 5000 } };
+        }
+
+        const response = await http.post(
+            useNearbySearch
+                ? 'https://places.googleapis.com/v1/places:searchNearby'
+                : 'https://places.googleapis.com/v1/places:searchText',
+            body,
+            {
+                headers: {
+                    'X-Goog-Api-Key': env.GOOGLE_MAPS_API_KEY,
+                    'X-Goog-FieldMask': 'places.id,places.displayName,places.primaryTypeDisplayName,places.formattedAddress,places.location,places.rating,places.currentOpeningHours.openNow,places.googleMapsUri'
+                },
+                timeout: timeoutFromEnv(env)
+            }
+        );
+
+        const places = (response.data?.places || [])
+            .filter((place) => openNow !== true || place.currentOpeningHours?.openNow === true)
+            .map((place) => ({
+                place,
+                distance: !searchCenter || !place.location ? null : Math.round(haversineMeters(
+                    searchCenter.latitude,
+                    searchCenter.longitude,
+                    place.location.latitude,
+                    place.location.longitude
+                ))
+            }))
+            .sort((a, b) => {
+                const distanceDifference = (a.distance ?? Number.MAX_SAFE_INTEGER) - (b.distance ?? Number.MAX_SAFE_INTEGER);
+                if (distanceDifference !== 0) return distanceDifference;
+                return (b.place.rating ?? 0) - (a.place.rating ?? 0);
+            })
+            .slice(0, limit);
+
+        const updatedAt = now().toISOString();
+        res.json({
+            query_type: type,
+            results: places.map(({ place, distance }) => ({
+                name: place.displayName?.text || null,
+                category: place.primaryTypeDisplayName?.text || null,
+                address: place.formattedAddress || null,
+                distance,
+                rating: place.rating ?? null,
+                open_now: place.currentOpeningHours?.openNow ?? null,
+                maps_url: place.googleMapsUri || (place.id ? `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(place.id)}` : null),
+                source: 'Google Places',
+                updated_at: updatedAt
+            })),
+            safety_notice: '本工具僅提供醫療場所位置資訊，不提供診斷、處方、用藥或醫療品質判斷。看診科別、營業時間、掛號狀況及藥品庫存請先向院所或藥局確認；如有呼吸困難、失去意識、大量出血等緊急狀況，請立即撥打 119。',
+            privacy_notice: '精確位置僅用於本次查詢，不應永久保存或在回覆中完整顯示。',
+            source: 'Google Places',
+            updated_at: updatedAt
+        });
+    }));
+
     router.get('/news', asyncHandler(async (req, res) => {
         optionalText(req.query.category, 'category', 30);
         optionalText(req.query.keywords, 'keywords', 100);
@@ -432,10 +534,10 @@ function enforcePlacesUsageLimit(usage, env, currentDate) {
         usage.minuteCount = 0;
     }
     if (usage.dayCount >= dailyLimit) {
-        throw apiError(429, 'PLACES_DAILY_LIMIT_REACHED', '今日餐廳查詢額度已達上限，請明日再試。');
+        throw apiError(429, 'PLACES_DAILY_LIMIT_REACHED', '今日 Google Places 查詢額度已達上限，請明日再試。');
     }
     if (usage.minuteCount >= minuteLimit) {
-        throw apiError(429, 'PLACES_RATE_LIMITED', '餐廳查詢過於頻繁，請稍後再試。');
+        throw apiError(429, 'PLACES_RATE_LIMITED', 'Google Places 查詢過於頻繁，請稍後再試。');
     }
 
     usage.dayCount += 1;
@@ -624,6 +726,13 @@ function buildOpenApiDocument(serverUrl) {
                 { name: 'keyword', in: 'query', schema: { type: 'string' } }, { name: 'budget', in: 'query', schema: { type: 'string' } },
                 { name: 'dietary', in: 'query', schema: { type: 'string', enum: [...DIETARY_VALUES] } },
                 { name: 'open_now', in: 'query', schema: { type: 'boolean' } }, parameters.language
+            ]) },
+            '/api/tools/healthcare': { get: operation('search_nearby_healthcare', '搜尋附近診所、醫院或藥局', '只提供醫療場所位置資訊，不提供診斷、處方或用藥建議。需要附近結果時應提供使用者授權的位置；緊急狀況請立即撥打 119。', [
+                { name: 'type', in: 'query', required: true, schema: { type: 'string', enum: Object.keys(HEALTHCARE_TYPES) } },
+                { name: 'location', in: 'query', schema: { type: 'string', maxLength: 100 } }, parameters.latitude, parameters.longitude,
+                { name: 'keyword', in: 'query', schema: { type: 'string', maxLength: 60 } },
+                { name: 'open_now', in: 'query', schema: { type: 'boolean' } }, parameters.language,
+                { name: 'limit', in: 'query', schema: { type: 'integer', default: 5, minimum: 1, maximum: 5 } }
             ]) },
             '/api/tools/news': { get: operation('search_taiwan_news', '搜尋臺灣新聞（第一階段由 Dify Web Search 執行）', '此端點第一階段不執行搜尋；Agent 應改用 Dify Marketplace 合法 Web Search 工具。', [
                 { name: 'category', in: 'query', schema: { type: 'string' } }, { name: 'keywords', in: 'query', schema: { type: 'string' } },

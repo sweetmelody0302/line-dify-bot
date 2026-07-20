@@ -198,12 +198,56 @@ test('food API safely reports Google Places request errors', async () => {
     }
 });
 
+test('healthcare API returns nearby clinics with safety notices', async () => {
+    const response = await request('/api/tools/healthcare?type=clinic&latitude=25&longitude=121&open_now=true&limit=3');
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.query_type, 'clinic');
+    assert.equal(body.results.length, 3);
+    assert.ok(body.results.every((place) => place.open_now === true));
+    assert.ok(body.results.every((place) => Number.isInteger(place.distance)));
+    assert.match(body.safety_notice, /不提供診斷、處方、用藥/);
+    assert.match(body.safety_notice, /119/);
+    assert.match(body.privacy_notice, /不應永久保存/);
+    assert.match(lastGooglePlacesUrl, /places:searchNearby$/);
+    assert.deepEqual(lastGooglePlacesBody.includedTypes, ['medical_clinic', 'doctor']);
+    assert.equal(lastGooglePlacesBody.locationRestriction.circle.radius, 5000);
+    assert.equal(lastGooglePlacesBody.rankPreference, 'DISTANCE');
+});
+
+test('healthcare API validates type and location before calling Google Places', async () => {
+    const countBefore = googlePlacesRequestCount;
+    const missingType = await request('/api/tools/healthcare?location=Taoyuan');
+    assert.equal(missingType.status, 400);
+    assert.equal((await missingType.json()).error.code, 'MISSING_HEALTHCARE_TYPE');
+
+    const invalidType = await request('/api/tools/healthcare?type=dentist&location=Taoyuan');
+    assert.equal(invalidType.status, 400);
+    assert.equal((await invalidType.json()).error.code, 'INVALID_PARAMETER');
+
+    const missingLocation = await request('/api/tools/healthcare?type=pharmacy');
+    assert.equal(missingLocation.status, 400);
+    assert.equal((await missingLocation.json()).error.code, 'MISSING_LOCATION');
+    assert.equal(googlePlacesRequestCount, countBefore);
+});
+
+test('healthcare API maps hospital and pharmacy to supported Google place types', async () => {
+    const hospital = await request('/api/tools/healthcare?type=hospital&latitude=25&longitude=121');
+    assert.equal(hospital.status, 200);
+    assert.deepEqual(lastGooglePlacesBody.includedTypes, ['hospital', 'general_hospital', 'medical_center']);
+
+    const pharmacy = await request('/api/tools/healthcare?type=pharmacy&latitude=25&longitude=121');
+    assert.equal(pharmacy.status, 200);
+    assert.deepEqual(lastGooglePlacesBody.includedTypes, ['pharmacy', 'drugstore']);
+});
+
 test('OpenAPI document is public and contains all Dify operation IDs', async () => {
     const response = await request('/api/tools/openapi.json', false);
     const body = await response.json();
     assert.equal(response.status, 200);
     const operationIds = Object.values(body.paths).map((path) => path.get.operationId);
     assert.deepEqual(operationIds, [
-        'get_taiwan_time', 'get_taiwan_weather', 'search_taiwan_bus', 'search_nearby_food', 'search_taiwan_news'
+        'get_taiwan_time', 'get_taiwan_weather', 'search_taiwan_bus', 'search_nearby_food',
+        'search_nearby_healthcare', 'search_taiwan_news'
     ]);
 });

@@ -192,7 +192,7 @@ app.post('/webhook', async (req, res) => {
                     if (markManualLocationRequest(event.source)) {
                         replyLineText(replyToken, '請直接輸入您要查詢的地點，例如：\n桃園市龜山區文化一路\n\n我會將地點交給 AI 助理進行這次查詢。📍');
                     } else {
-                        replyLineText(replyToken, '請先輸入「附近美食」或「附近公車站」，再選擇手動輸入地點。📍');
+                        replyLineText(replyToken, '請先輸入「附近美食」、「附近公車站」或「附近診所／醫院／藥局」，再選擇手動輸入地點。📍');
                     }
                     continue;
                 }
@@ -643,7 +643,7 @@ async function replyLineText(replyToken, text) {
 
 function isLocationToolRequest(text) {
     const normalized = (text || '').trim().toLowerCase();
-    return /(附近|鄰近).*(美食|餐廳|吃|公車|巴士|站牌)|nearby\s+(food|restaurant|bus|stop)/i.test(normalized);
+    return /(附近|鄰近).*(美食|餐廳|吃|公車|巴士|站牌|診所|醫院|藥局|藥房|醫師|醫生)|nearby\s+(food|restaurant|bus|stop|clinic|hospital|pharmacy|doctor)/i.test(normalized);
 }
 
 function isManualLocationCommand(text) {
@@ -713,7 +713,7 @@ async function replyLocationQuickReply(replyToken) {
 async function handleLocationMessage(event) {
     const pending = takePendingLocationRequest(event.source);
     if (!pending) {
-        await replyLineText(event.replyToken, '目前沒有等待位置資訊的查詢。請先輸入「附近美食」或「附近公車站」。📍');
+        await replyLineText(event.replyToken, '目前沒有等待位置資訊的查詢。請先輸入「附近美食」、「附近公車站」或「附近診所／醫院／藥局」。📍');
         return;
     }
 
