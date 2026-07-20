@@ -292,4 +292,12 @@ test('OpenAPI document is public and contains all Dify operation IDs', async () 
     const openNowParameter = body.paths['/api/tools/healthcare'].get.parameters.find((parameter) => parameter.name === 'open_now');
     assert.match(openNowParameter.description, /目前營業中/);
     assert.match(body.paths['/api/tools/healthcare'].get.description, /open_now=true/);
+    const healthcareSchema = body.paths['/api/tools/healthcare'].get.responses[200].content['application/json'].schema;
+    assert.equal(healthcareSchema.additionalProperties, false);
+    assert.deepEqual(healthcareSchema.required, [
+        'query_type', 'queried_district', 'results', 'safety_notice', 'privacy_notice', 'source', 'updated_at'
+    ]);
+    assert.equal(healthcareSchema.properties.results.maxItems, 5);
+    assert.equal(healthcareSchema.properties.results.items.additionalProperties, false);
+    assert.equal(healthcareSchema.properties.results.items.properties.maps_url.format, 'uri');
 });

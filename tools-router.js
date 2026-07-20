@@ -705,11 +705,42 @@ function buildOpenApiDocument(serverUrl) {
         latitude: { name: 'latitude', in: 'query', schema: { type: 'number', minimum: -90, maximum: 90 } },
         longitude: { name: 'longitude', in: 'query', schema: { type: 'number', minimum: -180, maximum: 180 } }
     };
-    const operation = (operationId, summary, description, params) => ({
+    const healthcareResponseSchema = {
+        type: 'object',
+        additionalProperties: false,
+        required: ['query_type', 'queried_district', 'results', 'safety_notice', 'privacy_notice', 'source', 'updated_at'],
+        properties: {
+            query_type: { type: 'string', enum: Object.keys(HEALTHCARE_TYPES) },
+            queried_district: { type: 'string', nullable: true },
+            results: {
+                type: 'array',
+                maxItems: 5,
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['name', 'category', 'address', 'distance', 'rating', 'open_now', 'maps_url'],
+                    properties: {
+                        name: { type: 'string', nullable: true },
+                        category: { type: 'string', nullable: true },
+                        address: { type: 'string', nullable: true },
+                        distance: { type: 'integer', nullable: true },
+                        rating: { type: 'number', nullable: true },
+                        open_now: { type: 'boolean', nullable: true },
+                        maps_url: { type: 'string', format: 'uri', nullable: true }
+                    }
+                }
+            },
+            safety_notice: { type: 'string' },
+            privacy_notice: { type: 'string' },
+            source: { type: 'string' },
+            updated_at: { type: 'string', format: 'date-time' }
+        }
+    };
+    const operation = (operationId, summary, description, params, responseSchema = null) => ({
         operationId, summary, description, security: [{ ToolsKey: [] }, { BearerAuth: [] }],
         parameters: params,
         responses: {
-            200: { description: '成功', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+            200: { description: '成功', content: { 'application/json': { schema: responseSchema || { type: 'object', additionalProperties: true } } } },
             400: { description: '輸入參數錯誤' }, 401: { description: '驗證失敗' }, 429: { description: '請求過於頻繁' }, 502: { description: '外部服務錯誤' }
         }
     });
@@ -741,7 +772,7 @@ function buildOpenApiDocument(serverUrl) {
                 { name: 'keyword', in: 'query', schema: { type: 'string', maxLength: 60 } },
                 { name: 'open_now', in: 'query', description: '使用者要求目前營業中、現在有開或 open now 時必須設為 true；未要求時不要自行設定。', schema: { type: 'boolean' } }, parameters.language,
                 { name: 'limit', in: 'query', schema: { type: 'integer', default: 5, minimum: 1, maximum: 5 } }
-            ]) },
+            ], healthcareResponseSchema) },
             '/api/tools/news': { get: operation('search_taiwan_news', '搜尋臺灣新聞（第一階段由 Dify Web Search 執行）', '此端點第一階段不執行搜尋；Agent 應改用 Dify Marketplace 合法 Web Search 工具。', [
                 { name: 'category', in: 'query', schema: { type: 'string' } }, { name: 'keywords', in: 'query', schema: { type: 'string' } },
                 parameters.language, { name: 'limit', in: 'query', schema: { type: 'integer', default: 5, minimum: 1, maximum: 10 } }
