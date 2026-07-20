@@ -334,7 +334,7 @@ function createToolsRouter(options = {}) {
             {
                 headers: {
                     'X-Goog-Api-Key': env.GOOGLE_MAPS_API_KEY,
-                    'X-Goog-FieldMask': 'places.id,places.displayName,places.primaryType,places.types,places.primaryTypeDisplayName,places.formattedAddress,places.location,places.rating,places.currentOpeningHours.openNow,places.googleMapsUri'
+                    'X-Goog-FieldMask': 'places.id,places.displayName,places.primaryType,places.types,places.primaryTypeDisplayName,places.formattedAddress,places.location,places.rating,places.currentOpeningHours.openNow'
                 },
                 timeout: timeoutFromEnv(env)
             }
@@ -371,9 +371,7 @@ function createToolsRouter(options = {}) {
                 distance,
                 rating: place.rating ?? null,
                 open_now: place.currentOpeningHours?.openNow ?? null,
-                maps_url: place.googleMapsUri || (place.id ? `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(place.id)}` : null),
-                source: 'Google Places',
-                updated_at: updatedAt
+                maps_url: place.id ? buildGoogleMapsPlaceUrl(place) : null
             })),
             safety_notice: '本工具僅提供醫療場所位置資訊，不提供診斷、處方、用藥或醫療品質判斷。看診科別、營業時間、掛號狀況及藥品庫存請先向院所或藥局確認；如有呼吸困難、失去意識、大量出血等緊急狀況，請立即撥打 119。',
             privacy_notice: '精確位置僅用於本次查詢，不應永久保存或在回覆中完整顯示。',
@@ -694,6 +692,11 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
     const dLon = toRadians(lon2 - lon1);
     const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLon / 2) ** 2;
     return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function buildGoogleMapsPlaceUrl(place) {
+    const query = place.displayName?.text || place.formattedAddress || 'Google Maps';
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}&query_place_id=${encodeURIComponent(place.id)}`;
 }
 
 function buildOpenApiDocument(serverUrl) {

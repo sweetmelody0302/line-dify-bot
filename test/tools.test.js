@@ -255,6 +255,12 @@ test('healthcare API excludes non-medical primary place types', async () => {
     assert.equal(body.results.length, 5);
     assert.ok(body.results.every((place) => place.name !== '測試美容院'));
     assert.ok(body.results.every((place) => place.category !== '美容院'));
+    assert.match(body.results[0].maps_url, /^https:\/\/www\.google\.com\/maps\/search\/\?api=1&query=/);
+    assert.match(body.results[0].maps_url, /query_place_id=place-\d+$/);
+    assert.equal('source' in body.results[0], false);
+    assert.equal('updated_at' in body.results[0], false);
+    assert.equal(body.source, 'Google Places');
+    assert.equal(body.updated_at, '2026-07-19T04:34:56.000Z');
 });
 
 test('healthcare API only filters by district when explicitly requested', async () => {
