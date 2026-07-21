@@ -30,6 +30,7 @@ const LINE_BROADCAST_API_URL = 'https://api.line.me/v2/bot/message/broadcast';
 const LINE_MESSAGING_API_BASE_URL = 'https://api.line.me/v2/bot';
 const LINE_CONTENT_API_BASE_URL = 'https://api-data.line.me/v2/bot/message';
 const CLOUDINARY_UPLOAD_FOLDER = 'line-remote-publisher';
+const LATEST_ANNOUNCEMENT_PUBLIC_ID = `${CLOUDINARY_UPLOAD_FOLDER}/latest-announcement.json`;
 const REMOTE_DRAFT_TTL_MS = 6 * 60 * 60 * 1000;
 const REMOTE_MAX_IMAGES = 4;
 const LINE_TEXT_LIMIT = 5000;
@@ -179,6 +180,11 @@ app.post('/webhook', async (req, res) => {
 
                 if (isAdminAlertMessage(userMessage)) {
                     handleAdminAlert(userMessage, replyToken, event.source);
+                    continue;
+                }
+
+                if (isLatestAnnouncementRequest(userMessage)) {
+                    await handleLatestAnnouncement(replyToken);
                     continue;
                 }
 
@@ -895,9 +901,146 @@ async function publishRemoteDraft(replyToken, userId) {
         return;
     }
 
+    let latestAnnouncementSaved = true;
+    try {
+        await saveLatestAnnouncement(draft);
+        console.log('LATEST_ANNOUNCEMENT_SAVED');
+    } catch (error) {
+        latestAnnouncementSaved = false;
+        console.error('LATEST_ANNOUNCEMENT_SAVE_ERROR', error.response?.status || '', error.response?.data?.error?.message || error.message);
+    }
+
     remoteDrafts.delete(userId);
     console.log('REMOTE_BROADCAST_SENT');
-    await replyRemoteText(replyToken, `已發佈到實習處 LINE 官方帳號所有好友。\n\n本次發佈內容：${messages.length} 則訊息。`);
+    const savedNotice = latestAnnouncementSaved
+        ? '\n\n最新公告查詢已同步更新。'
+        : '\n\n注意：公告已送出，但最新公告查詢同步失敗，請查看 Zeabur Logs 的 LATEST_ANNOUNCEMENT_SAVE_ERROR。';
+    await replyRemoteText(replyToken, `已發佈到實習處 LINE 官方帳號所有好友。\n\n本次發佈內容：${messages.length} 則訊息。${savedNotice}`);
+}
+
+function isLatestAnnouncementRequest(text) {
+    const normalized = (text || '')
+        .replace(/\s+/g, '')
+        .replace(/[。．.!！?？、，,;；:：]/g, '')
+        .trim();
+
+    return normalized === '最新公告' || normalized === '查詢最新公告';
+}
+
+async function handleLatestAnnouncement(replyToken) {
+    try {
+        const announcement = await loadLatestAnnouncement();
+        if (!announcement || (!announcement.text && announcement.images.length === 0)) {
+            await replyLineText(replyToken, '目前尚未發布公告。請稍後再查看。📢');
+            return;
+        }
+
+        await axios.post(LINE_REPLY_API_URL, {
+            replyToken,
+            messages: buildLatestAnnouncementMessages(announcement)
+        }, {
+            headers: lineHeaders()
+        });
+        console.log('LATEST_ANNOUNCEMENT_REPLIED');
+    } catch (error) {
+        console.error('LATEST_ANNOUNCEMENT_READ_ERROR', error.response?.status || '', error.response?.data?.error?.message || error.message);
+        await replyLineText(replyToken, '目前無法讀取最新公告，請稍後再試。📢');
+    }
+}
+
+function buildLatestAnnouncementMessages(announcement) {
+    const publishedAt = new Date(announcement.publishedAt);
+    const publishedText = Number.isNaN(publishedAt.getTime())
+        ? ''
+        : `\n發布時間：${new Intl.DateTimeFormat('zh-TW', {
+            timeZone: 'Asia/Taipei',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        }).format(publishedAt)}`;
+    const body = announcement.text || '本公告為圖片內容，請查看下方圖片。';
+    const messages = [{
+        type: 'text',
+        text: `📢 最新公告${publishedText}\n\n${body}`.slice(0, LINE_TEXT_LIMIT)
+    }];
+
+    for (const image of announcement.images.slice(0, REMOTE_MAX_IMAGES)) {
+        messages.push({
+            type: 'image',
+            originalContentUrl: image.originalContentUrl,
+            previewImageUrl: image.previewImageUrl
+        });
+    }
+
+    return messages.slice(0, 5);
+}
+
+async function saveLatestAnnouncement(draft) {
+    const missingConfig = getMissingLatestAnnouncementConfig();
+    if (missingConfig.length > 0) {
+        throw new Error(`Missing config: ${missingConfig.join(', ')}`);
+    }
+
+    const announcement = {
+        text: getRemoteDraftText(draft),
+        images: draft.images.slice(0, REMOTE_MAX_IMAGES),
+        publishedAt: new Date().toISOString()
+    };
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const paramsToSign = {
+        overwrite: 'true',
+        public_id: LATEST_ANNOUNCEMENT_PUBLIC_ID,
+        timestamp
+    };
+    const body = new URLSearchParams();
+
+    body.append('file', `data:application/json;base64,${Buffer.from(JSON.stringify(announcement), 'utf8').toString('base64')}`);
+    body.append('overwrite', 'true');
+    body.append('public_id', LATEST_ANNOUNCEMENT_PUBLIC_ID);
+    body.append('timestamp', timestamp);
+    body.append('api_key', CLOUDINARY_API_KEY);
+    body.append('signature', createCloudinarySignature(paramsToSign));
+
+    await axios.post(
+        `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/raw/upload`,
+        body,
+        {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            timeout: 10000
+        }
+    );
+}
+
+async function loadLatestAnnouncement() {
+    const missingConfig = getMissingLatestAnnouncementConfig();
+    if (missingConfig.length > 0) {
+        throw new Error(`Missing config: ${missingConfig.join(', ')}`);
+    }
+
+    const url = `https://res.cloudinary.com/${CLOUDINARY_CLOUD_NAME}/raw/upload/${LATEST_ANNOUNCEMENT_PUBLIC_ID}?t=${Date.now()}`;
+    const response = await axios.get(url, { timeout: 8000 });
+    const announcement = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+
+    return {
+        text: typeof announcement?.text === 'string' ? announcement.text : '',
+        images: Array.isArray(announcement?.images)
+            ? announcement.images.filter((image) => image?.originalContentUrl && image?.previewImageUrl)
+            : [],
+        publishedAt: announcement?.publishedAt
+    };
+}
+
+function getMissingLatestAnnouncementConfig() {
+    return [
+        ['CLOUDINARY_CLOUD_NAME', CLOUDINARY_CLOUD_NAME],
+        ['CLOUDINARY_API_KEY', CLOUDINARY_API_KEY],
+        ['CLOUDINARY_API_SECRET', CLOUDINARY_API_SECRET]
+    ]
+        .filter(([, value]) => !value)
+        .map(([name]) => name);
 }
 
 function normalizeRemoteCommandText(text) {

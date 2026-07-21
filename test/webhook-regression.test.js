@@ -8,9 +8,13 @@ process.env.LINE_CHANNEL_SECRET = 'test-line-secret';
 process.env.LINE_CHANNEL_ACCESS_TOKEN = 'test-line-token';
 process.env.DIFY_API_KEY = 'test-dify-key';
 process.env.TOOLS_API_KEY = 'test-tools-key';
+process.env.CLOUDINARY_CLOUD_NAME = 'test-cloud';
+process.env.CLOUDINARY_API_KEY = 'test-cloud-key';
+process.env.CLOUDINARY_API_SECRET = 'test-cloud-secret';
 
 const calls = [];
 const originalPost = axios.post;
+const originalGet = axios.get;
 axios.post = async (url, body) => {
     calls.push({ url, body });
     if (url.includes('dify.ai')) {
@@ -21,6 +25,22 @@ axios.post = async (url, body) => {
         return { data: stream };
     }
     return { data: {} };
+};
+axios.get = async (url) => {
+    calls.push({ url, method: 'get' });
+    if (url.includes('res.cloudinary.com')) {
+        return {
+            data: {
+                text: '測試最新公告',
+                images: [{
+                    originalContentUrl: 'https://example.com/announcement.jpg',
+                    previewImageUrl: 'https://example.com/announcement.jpg'
+                }],
+                publishedAt: '2026-07-21T01:00:00.000Z'
+            }
+        };
+    }
+    return originalGet(url);
 };
 
 const app = require('../index');
@@ -36,6 +56,7 @@ test.before(async () => {
 
 test.after(async () => {
     axios.post = originalPost;
+    axios.get = originalGet;
     await new Promise((resolve) => server.close(resolve));
 });
 
@@ -78,6 +99,22 @@ test('text message still calls Dify and LINE Reply API', async () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.ok(calls.some((call) => call.url.includes('dify.ai/v1/chat-messages')));
     assert.ok(calls.some((call) => call.url.includes('/message/reply')));
+});
+
+test('latest announcement replies directly without calling Dify', async () => {
+    calls.length = 0;
+    const response = await webhook({ events: [{
+        type: 'message', replyToken: 'latest-announcement-token', source: { type: 'user', userId: 'U6' },
+        message: { id: 'M7', type: 'text', text: '最新公告' }
+    }] });
+
+    assert.equal(response.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(calls.some((call) => call.url.includes('dify.ai/v1/chat-messages')), false);
+    const reply = calls.find((call) => call.body?.replyToken === 'latest-announcement-token');
+    assert.equal(reply.body.messages.length, 2);
+    assert.match(reply.body.messages[0].text, /測試最新公告/);
+    assert.equal(reply.body.messages[1].type, 'image');
 });
 
 test('nearby query offers LINE location quick reply and uses location once', async () => {
