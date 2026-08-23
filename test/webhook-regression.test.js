@@ -6,6 +6,9 @@ const axios = require('axios');
 
 process.env.LINE_CHANNEL_SECRET = 'test-line-secret';
 process.env.LINE_CHANNEL_ACCESS_TOKEN = 'test-line-token';
+process.env.REMOTE_LINE_CHANNEL_SECRET = 'test-remote-secret';
+process.env.REMOTE_LINE_CHANNEL_ACCESS_TOKEN = 'test-remote-token';
+process.env.INTERNSHIP_LINE_CHANNEL_ACCESS_TOKEN = 'test-internship-line-token';
 process.env.DIFY_API_KEY = 'test-dify-key';
 process.env.TOOLS_API_KEY = 'test-tools-key';
 process.env.CLOUDINARY_CLOUD_NAME = 'test-cloud';
@@ -60,8 +63,8 @@ test.after(async () => {
     await new Promise((resolve) => server.close(resolve));
 });
 
-function signature(rawBody) {
-    return crypto.createHmac('sha256', process.env.LINE_CHANNEL_SECRET).update(rawBody).digest('base64');
+function signature(rawBody, channelSecret = process.env.LINE_CHANNEL_SECRET) {
+    return crypto.createHmac('sha256', channelSecret).update(rawBody).digest('base64');
 }
 
 async function webhook(body, validSignature = true) {
@@ -71,6 +74,18 @@ async function webhook(body, validSignature = true) {
         headers: {
             'Content-Type': 'application/json',
             'x-line-signature': validSignature ? signature(rawBody) : 'invalid'
+        },
+        body: rawBody
+    });
+}
+
+async function remoteWebhook(body) {
+    const rawBody = JSON.stringify(body);
+    return fetch(`${baseUrl}/remote-webhook`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'x-line-signature': signature(rawBody, process.env.REMOTE_LINE_CHANNEL_SECRET)
         },
         body: rawBody
     });
@@ -115,6 +130,32 @@ test('latest announcement replies directly without calling Dify', async () => {
     assert.equal(reply.body.messages.length, 2);
     assert.match(reply.body.messages[0].text, /測試最新公告/);
     assert.equal(reply.body.messages[1].type, 'image');
+});
+
+test('remote publisher can sync latest announcement without broadcasting', async () => {
+    calls.length = 0;
+    const userId = 'REMOTE-U1';
+
+    const draftResponse = await remoteWebhook({ events: [{
+        type: 'message', replyToken: 'remote-draft-token', source: { type: 'user', userId },
+        message: { id: 'RM1', type: 'text', text: '補登最新公告測試' }
+    }] });
+    assert.equal(draftResponse.status, 200);
+
+    calls.length = 0;
+    const syncResponse = await remoteWebhook({ events: [{
+        type: 'message', replyToken: 'remote-sync-token', source: { type: 'user', userId },
+        message: { id: 'RM2', type: 'text', text: '同步最新公告' }
+    }] });
+    assert.equal(syncResponse.status, 200);
+
+    const cloudinarySave = calls.find((call) => call.url.includes('/raw/upload'));
+    const broadcast = calls.find((call) => call.url.includes('/message/broadcast'));
+    const reply = calls.find((call) => call.body?.replyToken === 'remote-sync-token');
+
+    assert.ok(cloudinarySave);
+    assert.equal(broadcast, undefined);
+    assert.match(reply.body.messages[0].text, /沒有發送給官方帳號好友/);
 });
 
 test('nearby query offers LINE location quick reply and uses location once', async () => {

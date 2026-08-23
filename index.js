@@ -805,6 +805,11 @@ async function handleRemoteText(replyToken, userId, text) {
         return;
     }
 
+    if (commandText === '同步最新公告' || commandText === '只更新最新公告') {
+        await syncLatestAnnouncementDraft(replyToken, userId);
+        return;
+    }
+
     if (commandText === '確認發佈' || commandText === '確認發布' || commandText === '確認發佈到全部好友' || commandText === '確認發布到全部好友') {
         await publishRemoteDraft(replyToken, userId);
         return;
@@ -867,10 +872,30 @@ async function replyRemotePreview(replyToken, userId) {
     const previewTextBody = draftText.length > 3000
         ? `${draftText.slice(0, 3000)}\n...（文字較長，預覽已截短）`
         : draftText;
-    const previewText = `發文預覽\n\n文字：\n${previewTextBody}\n\n圖片：已收到 ${draft.images.length} 張，圖片會在下一則訊息顯示。\n\n若確認要發佈到「實習處 LINE 官方帳號」所有好友，請輸入：\n確認發佈\n\n若不要發佈，請輸入：\n取消`;
+    const previewText = `發文預覽\n\n文字：\n${previewTextBody}\n\n圖片：已收到 ${draft.images.length} 張，圖片會在下一則訊息顯示。\n\n若確認要發佈到「實習處 LINE 官方帳號」所有好友，請輸入：\n確認發佈\n\n若只更新「最新公告」查詢、不發送給好友，請輸入：\n同步最新公告\n\n若不要發佈，請輸入：\n取消`;
     const previewMessages = buildRemotePreviewMessages(previewText, draft.images);
 
     await replyRemoteMessages(replyToken, previewMessages);
+}
+
+async function syncLatestAnnouncementDraft(replyToken, userId) {
+    const draft = remoteDrafts.get(userId);
+    if (!hasRemoteDraftContent(draft)) {
+        await replyRemoteText(replyToken, '目前沒有可同步的發文草稿。\n\n請先傳送公告文字或圖片。');
+        return;
+    }
+
+    try {
+        await saveLatestAnnouncement(draft);
+    } catch (error) {
+        console.error('LATEST_ANNOUNCEMENT_SYNC_ERROR', error.response?.status || '', error.response?.data?.error?.message || error.message);
+        await replyRemoteText(replyToken, '最新公告同步失敗，草稿已保留，也沒有發送給好友。\n\n請到 Zeabur Logs 搜尋：\nLATEST_ANNOUNCEMENT_SYNC_ERROR');
+        return;
+    }
+
+    remoteDrafts.delete(userId);
+    console.log('LATEST_ANNOUNCEMENT_SYNCED_WITHOUT_BROADCAST');
+    await replyRemoteText(replyToken, '最新公告查詢資料已更新。\n\n本次只進行同步，沒有發送給官方帳號好友。');
 }
 
 async function publishRemoteDraft(replyToken, userId) {
