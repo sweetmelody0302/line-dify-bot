@@ -31,6 +31,7 @@ const LINE_MESSAGING_API_BASE_URL = 'https://api.line.me/v2/bot';
 const LINE_CONTENT_API_BASE_URL = 'https://api-data.line.me/v2/bot/message';
 const CLOUDINARY_UPLOAD_FOLDER = 'line-remote-publisher';
 const LATEST_ANNOUNCEMENT_PUBLIC_ID = `${CLOUDINARY_UPLOAD_FOLDER}/latest-announcement.json`;
+let latestAnnouncementDeliveryVersion = Math.floor(Date.now() / 1000).toString();
 const REMOTE_DRAFT_TTL_MS = 6 * 60 * 60 * 1000;
 const REMOTE_MAX_IMAGES = 4;
 const LINE_TEXT_LIMIT = 5000;
@@ -1016,6 +1017,7 @@ async function saveLatestAnnouncement(draft) {
     };
     const timestamp = Math.floor(Date.now() / 1000).toString();
     const paramsToSign = {
+        invalidate: 'true',
         overwrite: 'true',
         public_id: LATEST_ANNOUNCEMENT_PUBLIC_ID,
         timestamp
@@ -1023,13 +1025,14 @@ async function saveLatestAnnouncement(draft) {
     const body = new URLSearchParams();
 
     body.append('file', `data:application/json;base64,${Buffer.from(JSON.stringify(announcement), 'utf8').toString('base64')}`);
+    body.append('invalidate', 'true');
     body.append('overwrite', 'true');
     body.append('public_id', LATEST_ANNOUNCEMENT_PUBLIC_ID);
     body.append('timestamp', timestamp);
     body.append('api_key', CLOUDINARY_API_KEY);
     body.append('signature', createCloudinarySignature(paramsToSign));
 
-    await axios.post(
+    const response = await axios.post(
         `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/raw/upload`,
         body,
         {
@@ -1037,6 +1040,11 @@ async function saveLatestAnnouncement(draft) {
             timeout: 10000
         }
     );
+
+    const savedVersion = response.data?.version;
+    latestAnnouncementDeliveryVersion = savedVersion
+        ? String(savedVersion)
+        : timestamp;
 }
 
 async function loadLatestAnnouncement() {
@@ -1045,7 +1053,7 @@ async function loadLatestAnnouncement() {
         throw new Error(`Missing config: ${missingConfig.join(', ')}`);
     }
 
-    const url = `https://res.cloudinary.com/${CLOUDINARY_CLOUD_NAME}/raw/upload/${LATEST_ANNOUNCEMENT_PUBLIC_ID}?t=${Date.now()}`;
+    const url = `https://res.cloudinary.com/${CLOUDINARY_CLOUD_NAME}/raw/upload/v${latestAnnouncementDeliveryVersion}/${LATEST_ANNOUNCEMENT_PUBLIC_ID}`;
     const response = await axios.get(url, { timeout: 8000 });
     const announcement = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
 

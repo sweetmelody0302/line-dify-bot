@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const { PassThrough } = require('stream');
 const axios = require('axios');
+const TEST_CLOUDINARY_VERSION = '1787461200';
 
 process.env.LINE_CHANNEL_SECRET = 'test-line-secret';
 process.env.LINE_CHANNEL_ACCESS_TOKEN = 'test-line-token';
@@ -27,6 +28,9 @@ axios.post = async (url, body) => {
         });
         return { data: stream };
     }
+    if (url.includes('api.cloudinary.com') && url.includes('/raw/upload')) {
+        return { data: { version: TEST_CLOUDINARY_VERSION } };
+    }
     return { data: {} };
 };
 axios.get = async (url) => {
@@ -38,6 +42,9 @@ axios.get = async (url) => {
                 images: [{
                     originalContentUrl: 'https://example.com/announcement.jpg',
                     previewImageUrl: 'https://example.com/announcement.jpg'
+                }, {
+                    originalContentUrl: 'https://example.com/announcement-2.jpg',
+                    previewImageUrl: 'https://example.com/announcement-2.jpg'
                 }],
                 publishedAt: '2026-07-21T01:00:00.000Z'
             }
@@ -127,9 +134,12 @@ test('latest announcement replies directly without calling Dify', async () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(calls.some((call) => call.url.includes('dify.ai/v1/chat-messages')), false);
     const reply = calls.find((call) => call.body?.replyToken === 'latest-announcement-token');
-    assert.equal(reply.body.messages.length, 2);
+    assert.equal(reply.body.messages.length, 3);
     assert.match(reply.body.messages[0].text, /測試最新公告/);
     assert.equal(reply.body.messages[1].type, 'image');
+    assert.equal(reply.body.messages[2].type, 'image');
+    const cloudinaryRead = calls.find((call) => call.method === 'get' && call.url.includes('res.cloudinary.com'));
+    assert.match(cloudinaryRead.url, /\/raw\/upload\/v\d+\/line-remote-publisher\/latest-announcement\.json$/);
 });
 
 test('remote publisher can sync latest announcement without broadcasting', async () => {
@@ -154,8 +164,18 @@ test('remote publisher can sync latest announcement without broadcasting', async
     const reply = calls.find((call) => call.body?.replyToken === 'remote-sync-token');
 
     assert.ok(cloudinarySave);
+    assert.equal(cloudinarySave.body.get('invalidate'), 'true');
     assert.equal(broadcast, undefined);
     assert.match(reply.body.messages[0].text, /沒有發送給官方帳號好友/);
+
+    calls.length = 0;
+    const latestResponse = await webhook({ events: [{
+        type: 'message', replyToken: 'latest-after-sync-token', source: { type: 'user', userId: 'U7' },
+        message: { id: 'M8', type: 'text', text: '最新公告' }
+    }] });
+    assert.equal(latestResponse.status, 200);
+    const versionedRead = calls.find((call) => call.method === 'get' && call.url.includes('res.cloudinary.com'));
+    assert.match(versionedRead.url, new RegExp(`/raw/upload/v${TEST_CLOUDINARY_VERSION}/`));
 });
 
 test('nearby query offers LINE location quick reply and uses location once', async () => {
