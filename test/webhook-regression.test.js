@@ -17,6 +17,8 @@ process.env.CLOUDINARY_API_KEY = 'test-cloud-key';
 process.env.CLOUDINARY_API_SECRET = 'test-cloud-secret';
 
 const calls = [];
+const DEFAULT_DIFY_STREAM = 'data: {"event":"agent_message","answer":"測試回答✅"}\n\n';
+let difyStreamPayload = DEFAULT_DIFY_STREAM;
 const originalPost = axios.post;
 const originalGet = axios.get;
 axios.post = async (url, body) => {
@@ -24,7 +26,7 @@ axios.post = async (url, body) => {
     if (url.includes('dify.ai')) {
         const stream = new PassThrough();
         setImmediate(() => {
-            stream.end('data: {"event":"agent_message","answer":"測試回答✅"}\n\n');
+            stream.end(difyStreamPayload);
         });
         return { data: stream };
     }
@@ -62,6 +64,10 @@ test.before(async () => {
         const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
     });
     baseUrl = `http://127.0.0.1:${server.address().port}`;
+});
+
+test.beforeEach(() => {
+    difyStreamPayload = DEFAULT_DIFY_STREAM;
 });
 
 test.after(async () => {
@@ -121,6 +127,98 @@ test('text message still calls Dify and LINE Reply API', async () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.ok(calls.some((call) => call.url.includes('dify.ai/v1/chat-messages')));
     assert.ok(calls.some((call) => call.url.includes('/message/reply')));
+});
+
+test('Dify text_chunk event is returned to LINE', async () => {
+    calls.length = 0;
+    difyStreamPayload = [
+        'data: {"event":"text_chunk","data":{"text":"文字區塊回答✅"}}',
+        'data: {"event":"message_end"}',
+        ''
+    ].join('\n\n');
+
+    const response = await webhook({ events: [{
+        type: 'message',
+        webhookEventId: 'dify-text-chunk-event',
+        replyToken: 'dify-text-chunk-token',
+        source: { type: 'user', userId: 'U-DIFY-TEXT-CHUNK' },
+        message: { id: 'M-DIFY-TEXT-CHUNK', type: 'text', text: '文字區塊事件測試' }
+    }] });
+
+    assert.equal(response.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const reply = calls.find((call) => call.body?.replyToken === 'dify-text-chunk-token');
+    assert.match(reply.body.messages[0].text, /文字區塊回答/);
+});
+
+test('Dify message_replace event safely replaces the reply', async () => {
+    calls.length = 0;
+    difyStreamPayload = [
+        'data: {"event":"message","answer":"原始回答"}',
+        'data: {"event":"message_replace","answer":"安全替代回答"}',
+        'data: {"event":"message_end"}',
+        ''
+    ].join('\n\n');
+
+    const response = await webhook({ events: [{
+        type: 'message',
+        webhookEventId: 'dify-message-replace-event',
+        replyToken: 'dify-message-replace-token',
+        source: { type: 'user', userId: 'U-DIFY-MESSAGE-REPLACE' },
+        message: { id: 'M-DIFY-MESSAGE-REPLACE', type: 'text', text: '替代回答事件測試' }
+    }] });
+
+    assert.equal(response.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const reply = calls.find((call) => call.body?.replyToken === 'dify-message-replace-token');
+    assert.match(reply.body.messages[0].text, /安全替代回答/);
+    assert.doesNotMatch(reply.body.messages[0].text, /原始回答/);
+});
+
+test('empty Dify message_replace does not expose the original moderated reply', async () => {
+    calls.length = 0;
+    difyStreamPayload = [
+        'data: {"event":"message","answer":"不應顯示的原始回答"}',
+        'data: {"event":"message_replace","answer":""}',
+        'data: {"event":"message_end"}',
+        ''
+    ].join('\n\n');
+
+    const response = await webhook({ events: [{
+        type: 'message',
+        webhookEventId: 'dify-empty-replace-event',
+        replyToken: 'dify-empty-replace-token',
+        source: { type: 'user', userId: 'U-DIFY-EMPTY-REPLACE' },
+        message: { id: 'M-DIFY-EMPTY-REPLACE', type: 'text', text: '空白替代事件測試' }
+    }] });
+
+    assert.equal(response.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const reply = calls.find((call) => call.body?.replyToken === 'dify-empty-replace-token');
+    assert.match(reply.body.messages[0].text, /AI 回覆服務暫時無法完成回答/);
+    assert.doesNotMatch(reply.body.messages[0].text, /不應顯示的原始回答/);
+});
+
+test('Dify error event returns a clear fallback without exposing error details', async () => {
+    calls.length = 0;
+    difyStreamPayload = [
+        'data: {"event":"error","status":500,"code":"provider_error","message":"private provider detail"}',
+        ''
+    ].join('\n\n');
+
+    const response = await webhook({ events: [{
+        type: 'message',
+        webhookEventId: 'dify-error-event',
+        replyToken: 'dify-error-token',
+        source: { type: 'user', userId: 'U-DIFY-ERROR' },
+        message: { id: 'M-DIFY-ERROR', type: 'text', text: '錯誤事件測試' }
+    }] });
+
+    assert.equal(response.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const reply = calls.find((call) => call.body?.replyToken === 'dify-error-token');
+    assert.match(reply.body.messages[0].text, /AI 回覆服務暫時無法完成回答/);
+    assert.doesNotMatch(reply.body.messages[0].text, /private provider detail/);
 });
 
 test('duplicate webhook event is processed only once', async () => {

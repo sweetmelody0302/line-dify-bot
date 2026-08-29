@@ -1374,8 +1374,27 @@ async function handleMessage(userMessage, replyToken, userId) {
         });
 
         let replyText = '';
+        let textChunkReply = '';
+        let replacementReply = '';
+        let replacementReplyReceived = false;
+        let workflowOutputReply = '';
         let streamBuffer = ''; // 【重要修復：斷字殺手】水桶緩衝區
+        let streamParseErrorCount = 0;
+        let streamError = null;
+        const observedStreamEvents = new Set();
         const utf8Decoder = new StringDecoder('utf8');
+
+        function getWorkflowOutputText(outputs) {
+            if (!outputs || typeof outputs !== 'object') return '';
+
+            for (const key of ['answer', 'text', 'result', 'output']) {
+                if (typeof outputs[key] === 'string' && outputs[key].trim()) {
+                    return outputs[key];
+                }
+            }
+
+            return '';
+        }
 
         function processStreamLines(lines) {
             for (const line of lines) {
@@ -1385,12 +1404,36 @@ async function handleMessage(userMessage, replyToken, userId) {
                         const jsonStr = trimmedLine.substring(5).trim();
                         if (!jsonStr) continue;
                         const data = JSON.parse(jsonStr);
+                        const eventName = typeof data.event === 'string'
+                            ? data.event.trim().toLowerCase()
+                            : '';
 
-                        if (data.event === 'message' || data.event === 'agent_message') {
+                        if (eventName) {
+                            observedStreamEvents.add(eventName.replace(/[^a-z0-9_-]/g, '').slice(0, 40));
+                        }
+
+                        if ((eventName === 'message' || eventName === 'agent_message') && typeof data.answer === 'string') {
                             replyText += data.answer;
+                        } else if (eventName === 'text_chunk' && typeof data.data?.text === 'string') {
+                            textChunkReply += data.data.text;
+                        } else if (eventName === 'message_replace' && typeof data.answer === 'string') {
+                            replacementReplyReceived = true;
+                            replacementReply = data.answer;
+                        } else if (eventName === 'workflow_finished') {
+                            workflowOutputReply = workflowOutputReply || getWorkflowOutputText(data.data?.outputs);
+                            if (data.data?.status === 'failed') {
+                                streamError = { status: '', code: 'workflow_failed' };
+                            }
+                        } else if (eventName === 'error') {
+                            streamError = {
+                                status: Number.isInteger(data.status) ? String(data.status) : '',
+                                code: typeof data.code === 'string'
+                                    ? data.code.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 80)
+                                    : 'unknown'
+                            };
                         }
                     } catch (e) {
-                        // 忽略格式錯誤
+                        streamParseErrorCount += 1;
                     }
                 }
             }
@@ -1415,9 +1458,22 @@ async function handleMessage(userMessage, replyToken, userId) {
                     processStreamLines([streamBuffer]);
                 }
 
+                replyText = replacementReplyReceived
+                    ? replacementReply
+                    : replyText || textChunkReply || workflowOutputReply;
+
+                if (streamError) {
+                    console.warn(`DIFY_STREAM_ERROR status=${streamError.status || 'unknown'} code=${streamError.code}`);
+                }
+
+                if (streamParseErrorCount > 0) {
+                    console.warn(`DIFY_STREAM_PARSE_ERROR count=${streamParseErrorCount}`);
+                }
+
                 if (!replyText) {
-                    console.warn('DIFY_EMPTY_REPLY');
-                    replyText = "抱歉，實習處大腦剛剛恍神了，請再問我一次！";
+                    const eventSummary = [...observedStreamEvents].filter(Boolean).join(',') || 'none';
+                    console.warn(`DIFY_EMPTY_REPLY events=${eventSummary}`);
+                    replyText = "抱歉，目前 AI 回覆服務暫時無法完成回答，請稍後再試一次；若仍有問題，請聯絡實習處協助。😊";
                 }
 
                 // LINE 手機畫面優化：移除 markdown 粗體符號與亂碼替代字，並保留一點親切小圖標。
