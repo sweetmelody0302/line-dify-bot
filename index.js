@@ -42,6 +42,10 @@ const remoteDrafts = new Map();
 const adminImageHandoffs = new Map();
 const adminCases = new Map();
 const pendingLocationRequests = new Map();
+const WEBHOOK_EVENT_DEDUP_TTL_MS = 10 * 60 * 1000;
+const RAPID_REPEAT_TTL_MS = 15 * 1000;
+const processedWebhookEvents = new Map();
+const recentUserMessages = new Map();
 let adminCaseSequence = 0;
 const LOCATION_REQUEST_TTL_MS = 10 * 60 * 1000;
 
@@ -136,6 +140,63 @@ function normalizeLineReplyText(text) {
     return normalizedText;
 }
 
+function cleanupExpiredEntries(map, ttlMs, now = Date.now()) {
+    for (const [key, seenAt] of map.entries()) {
+        if (now - seenAt > ttlMs) {
+            map.delete(key);
+        }
+    }
+}
+
+function shouldSkipDuplicateWebhookEvent(event) {
+    const webhookEventId = typeof event?.webhookEventId === 'string'
+        ? event.webhookEventId.trim()
+        : '';
+    const messageId = typeof event?.message?.id === 'string'
+        ? event.message.id.trim()
+        : '';
+    const eventKey = webhookEventId
+        ? `event:${webhookEventId}`
+        : messageId
+            ? `message:${messageId}`
+            : '';
+
+    if (!eventKey) return false;
+
+    const now = Date.now();
+    cleanupExpiredEntries(processedWebhookEvents, WEBHOOK_EVENT_DEDUP_TTL_MS, now);
+
+    if (processedWebhookEvents.has(eventKey)) {
+        console.log('LINE_DUPLICATE_EVENT_SKIPPED');
+        return true;
+    }
+
+    processedWebhookEvents.set(eventKey, now);
+    return false;
+}
+
+function shouldSkipRapidRepeatText(source, text) {
+    if (!source?.userId || typeof text !== 'string') return false;
+
+    const normalizedText = text.trim().replace(/\s+/g, ' ');
+    if (!normalizedText) return false;
+
+    const repeatKey = crypto.createHash('sha256')
+        .update(`${source.type || 'user'}:${source.userId}:${normalizedText}`)
+        .digest('hex');
+    const now = Date.now();
+    cleanupExpiredEntries(recentUserMessages, RAPID_REPEAT_TTL_MS, now);
+
+    const previousSeenAt = recentUserMessages.get(repeatKey);
+    if (previousSeenAt && now - previousSeenAt <= RAPID_REPEAT_TTL_MS) {
+        console.log('LINE_RAPID_REPEAT_SKIPPED');
+        return true;
+    }
+
+    recentUserMessages.set(repeatKey, now);
+    return false;
+}
+
 // 接收 LINE 訊息的 Webhook 端點
 app.post('/webhook', async (req, res) => {
     try {
@@ -152,6 +213,10 @@ app.post('/webhook', async (req, res) => {
         const followReplyTasks = [];
 
         for (const event of events) {
+            if (shouldSkipDuplicateWebhookEvent(event)) {
+                continue;
+            }
+
             if (event.type === 'follow') {
                 followReplyTasks.push(handleFollow(event));
                 continue;
@@ -159,11 +224,15 @@ app.post('/webhook', async (req, res) => {
 
             // 只處理文字訊息，原本 message event -> Dify 流程維持不變
             if (event.type === 'message' && event.message && event.message.type === 'text') {
-                console.log('LINE_MESSAGE_EVENT_RECEIVED');
-
                 const userMessage = event.message.text;
                 const replyToken = event.replyToken;
                 const userId = event.source.userId;
+
+                if (shouldSkipRapidRepeatText(event.source, userMessage)) {
+                    continue;
+                }
+
+                console.log('LINE_MESSAGE_EVENT_RECEIVED');
 
                 if (isAdminTargetIdRequest(userMessage)) {
                     handleAdminTargetIdRequest(replyToken, event.source);
@@ -1346,7 +1415,10 @@ async function handleMessage(userMessage, replyToken, userId) {
                     processStreamLines([streamBuffer]);
                 }
 
-                if (!replyText) replyText = "抱歉，實習處大腦剛剛恍神了，請再問我一次！";
+                if (!replyText) {
+                    console.warn('DIFY_EMPTY_REPLY');
+                    replyText = "抱歉，實習處大腦剛剛恍神了，請再問我一次！";
+                }
 
                 // LINE 手機畫面優化：移除 markdown 粗體符號與亂碼替代字，並保留一點親切小圖標。
                 replyText = normalizeLineReplyText(replyText);

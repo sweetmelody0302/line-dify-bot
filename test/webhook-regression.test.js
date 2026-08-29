@@ -123,6 +123,68 @@ test('text message still calls Dify and LINE Reply API', async () => {
     assert.ok(calls.some((call) => call.url.includes('/message/reply')));
 });
 
+test('duplicate webhook event is processed only once', async () => {
+    calls.length = 0;
+    const event = {
+        type: 'message',
+        webhookEventId: 'duplicate-event-1',
+        deliveryContext: { isRedelivery: false },
+        replyToken: 'duplicate-token-1',
+        source: { type: 'user', userId: 'U-DUPLICATE-1' },
+        message: { id: 'M-DUPLICATE-1', type: 'text', text: '重複事件測試' }
+    };
+
+    const firstResponse = await webhook({ events: [event] });
+    const secondResponse = await webhook({ events: [{
+        ...event,
+        replyToken: 'duplicate-token-2',
+        deliveryContext: { isRedelivery: true }
+    }] });
+
+    assert.equal(firstResponse.status, 200);
+    assert.equal(secondResponse.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(calls.filter((call) => call.url.includes('dify.ai/v1/chat-messages')).length, 1);
+});
+
+test('rapid identical text from the same user is processed only once', async () => {
+    calls.length = 0;
+    const createEvent = (eventNumber) => ({
+        type: 'message',
+        webhookEventId: `rapid-event-${eventNumber}`,
+        replyToken: `rapid-token-${eventNumber}`,
+        source: { type: 'user', userId: 'U-RAPID-1' },
+        message: { id: `M-RAPID-${eventNumber}`, type: 'text', text: '短時間重複問題測試' }
+    });
+
+    const firstResponse = await webhook({ events: [createEvent(1)] });
+    const secondResponse = await webhook({ events: [createEvent(2)] });
+
+    assert.equal(firstResponse.status, 200);
+    assert.equal(secondResponse.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(calls.filter((call) => call.url.includes('dify.ai/v1/chat-messages')).length, 1);
+});
+
+test('different text from the same user still processes normally', async () => {
+    calls.length = 0;
+    const createEvent = (eventNumber, text) => ({
+        type: 'message',
+        webhookEventId: `different-event-${eventNumber}`,
+        replyToken: `different-token-${eventNumber}`,
+        source: { type: 'user', userId: 'U-RAPID-2' },
+        message: { id: `M-DIFFERENT-${eventNumber}`, type: 'text', text }
+    });
+
+    const firstResponse = await webhook({ events: [createEvent(1, '第一個問題')] });
+    const secondResponse = await webhook({ events: [createEvent(2, '第二個問題')] });
+
+    assert.equal(firstResponse.status, 200);
+    assert.equal(secondResponse.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(calls.filter((call) => call.url.includes('dify.ai/v1/chat-messages')).length, 2);
+});
+
 test('latest announcement replies directly without calling Dify', async () => {
     calls.length = 0;
     const response = await webhook({ events: [{
