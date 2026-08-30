@@ -125,7 +125,14 @@ test('text message still calls Dify and LINE Reply API', async () => {
     }] });
     assert.equal(response.status, 200);
     await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.ok(calls.some((call) => call.url.includes('dify.ai/v1/chat-messages')));
+    const difyCall = calls.find((call) => call.url.includes('dify.ai/v1/chat-messages'));
+    assert.ok(difyCall);
+    assert.match(difyCall.body.user, /^line_[a-f0-9]{24}$/);
+    assert.equal(
+        difyCall.body.user,
+        `line_${crypto.createHash('sha256').update('U2').digest('hex').slice(0, 24)}`
+    );
+    assert.notEqual(difyCall.body.user, 'U2');
     assert.ok(calls.some((call) => call.url.includes('/message/reply')));
 });
 

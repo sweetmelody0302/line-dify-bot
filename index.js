@@ -197,6 +197,18 @@ function shouldSkipRapidRepeatText(source, text) {
     return false;
 }
 
+function buildDifyUserId(userId) {
+    const stableSource = typeof userId === 'string' && userId.trim()
+        ? userId.trim()
+        : 'anonymous';
+    const anonymousId = crypto.createHash('sha256')
+        .update(stableSource)
+        .digest('hex')
+        .slice(0, 24);
+
+    return `line_${anonymousId}`;
+}
+
 // 接收 LINE 訊息的 Webhook 端點
 app.post('/webhook', async (req, res) => {
     try {
@@ -1364,7 +1376,9 @@ async function handleMessage(userMessage, replyToken, userId) {
             inputs: {},
             query: enrichedMessage,
             response_mode: 'streaming', // <--- 修正：Dify Agent 專用模式
-            user: userId
+            // Dify 僅需要穩定的使用者識別值；不傳送完整 LINE User ID，
+            // 同時避免部分帳號識別格式被模型供應商判定為 invalid_param。
+            user: buildDifyUserId(userId)
         }, {
             headers: {
                 'Authorization': `Bearer ${DIFY_API_KEY}`,
