@@ -16,6 +16,7 @@ const TAIWAN_CITIES = new Set([
     'YilanCounty', 'HualienCounty', 'TaitungCounty', 'PenghuCounty',
     'KinmenCounty', 'LienchiangCounty'
 ]);
+const CWA_WEATHER_LOCATION_ALIASES = buildWeatherLocationAliases();
 const SUPPORTED_LANGUAGES = new Set([
     'zh-TW', 'en', 'ja', 'vi', 'th', 'my', 'id', 'lo', 'ms'
 ]);
@@ -89,7 +90,7 @@ function createToolsRouter(options = {}) {
     });
 
     router.get('/weather', asyncHandler(async (req, res) => {
-        const location = requiredText(req.query.location, 'location', 40);
+        const location = normalizeWeatherLocation(requiredText(req.query.location, 'location', 40));
         const date = optionalDate(req.query.date);
         const language = optionalLanguage(req.query.language);
         requireEnv(env, ['CWA_API_KEY']);
@@ -548,6 +549,53 @@ function enforcePlacesUsageLimit(usage, env, currentDate) {
 
 function stableKey(prefix, values) {
     return `${prefix}:${crypto.createHash('sha256').update(JSON.stringify(values)).digest('hex')}`;
+}
+
+function buildWeatherLocationAliases() {
+    const definitions = [
+        ['臺北市', ['臺北', '台北', '台北市', 'Taipei', 'Taipei City']],
+        ['新北市', ['新北', 'New Taipei', 'New Taipei City', 'NewTaipei']],
+        ['桃園市', ['桃園', 'Taoyuan', 'Taoyuan City']],
+        ['臺中市', ['臺中', '台中', '台中市', 'Taichung', 'Taichung City']],
+        ['臺南市', ['臺南', '台南', '台南市', 'Tainan', 'Tainan City']],
+        ['高雄市', ['高雄', 'Kaohsiung', 'Kaohsiung City']],
+        ['基隆市', ['基隆', 'Keelung', 'Keelung City']],
+        ['新竹市', ['新竹', 'Hsinchu', 'Hsinchu City']],
+        ['新竹縣', ['Hsinchu County']],
+        ['苗栗縣', ['苗栗', 'Miaoli', 'Miaoli County']],
+        ['彰化縣', ['彰化', 'Changhua', 'Changhua County']],
+        ['南投縣', ['南投', 'Nantou', 'Nantou County']],
+        ['雲林縣', ['雲林', 'Yunlin', 'Yunlin County']],
+        ['嘉義市', ['嘉義', 'Chiayi', 'Chiayi City']],
+        ['嘉義縣', ['Chiayi County']],
+        ['屏東縣', ['屏東', 'Pingtung', 'Pingtung County']],
+        ['宜蘭縣', ['宜蘭', 'Yilan', 'Yilan County']],
+        ['花蓮縣', ['花蓮', 'Hualien', 'Hualien County']],
+        ['臺東縣', ['臺東', '台東', '台東縣', 'Taitung', 'Taitung County']],
+        ['澎湖縣', ['澎湖', 'Penghu', 'Penghu County']],
+        ['金門縣', ['金門', 'Kinmen', 'Kinmen County']],
+        ['連江縣', ['連江', 'Lienchiang', 'Lienchiang County', 'Matsu']]
+    ];
+    const aliases = new Map();
+
+    for (const [canonical, values] of definitions) {
+        for (const value of [canonical, ...values]) {
+            aliases.set(weatherLocationKey(value), canonical);
+        }
+    }
+
+    return aliases;
+}
+
+function weatherLocationKey(value) {
+    return String(value).trim().toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+function normalizeWeatherLocation(location) {
+    const normalized = String(location).trim().replace(/台/g, '臺');
+    return CWA_WEATHER_LOCATION_ALIASES.get(weatherLocationKey(location))
+        || CWA_WEATHER_LOCATION_ALIASES.get(weatherLocationKey(normalized))
+        || normalized;
 }
 
 function normalizeKnownLocation(location) {

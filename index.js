@@ -44,8 +44,11 @@ const adminCases = new Map();
 const pendingLocationRequests = new Map();
 const WEBHOOK_EVENT_DEDUP_TTL_MS = 10 * 60 * 1000;
 const RAPID_REPEAT_TTL_MS = 15 * 1000;
+const DIFY_CONVERSATION_TTL_MS = 24 * 60 * 60 * 1000;
+const DIFY_CONVERSATION_MAX_ENTRIES = 5000;
 const processedWebhookEvents = new Map();
 const recentUserMessages = new Map();
+const difyConversations = new Map();
 let adminCaseSequence = 0;
 const LOCATION_REQUEST_TTL_MS = 10 * 60 * 1000;
 
@@ -93,9 +96,9 @@ Selamat datang. Anda boleh bertanya dalam bahasa anda.
 (03) 3294188
 
 實習處主任 程主任：601
-實習處組長：607
+實習處組長：602
 建教組：602
-就業輔導組：608
+就業輔導組：602
 
 您也可以點選下方選單，快速查詢相關服務。`
     }
@@ -207,6 +210,40 @@ function buildDifyUserId(userId) {
         .slice(0, 24);
 
     return `line_${anonymousId}`;
+}
+
+function getDifyConversationId(difyUserId, currentTime = Date.now()) {
+    const item = difyConversations.get(difyUserId);
+    if (!item) return '';
+    if (item.expiresAt <= currentTime) {
+        difyConversations.delete(difyUserId);
+        return '';
+    }
+    return item.conversationId;
+}
+
+function rememberDifyConversationId(difyUserId, conversationId, currentTime = Date.now()) {
+    if (typeof conversationId !== 'string') return;
+    const normalizedId = conversationId.trim();
+    if (!normalizedId || normalizedId.length > 200) return;
+
+    for (const [key, item] of difyConversations) {
+        if (item.expiresAt <= currentTime) difyConversations.delete(key);
+    }
+
+    if (difyConversations.has(difyUserId)) {
+        difyConversations.delete(difyUserId);
+    }
+    while (difyConversations.size >= DIFY_CONVERSATION_MAX_ENTRIES) {
+        const oldestKey = difyConversations.keys().next().value;
+        if (oldestKey === undefined) break;
+        difyConversations.delete(oldestKey);
+    }
+
+    difyConversations.set(difyUserId, {
+        conversationId: normalizedId,
+        expiresAt: currentTime + DIFY_CONVERSATION_TTL_MS
+    });
 }
 
 // 接收 LINE 訊息的 Webhook 端點
@@ -1371,15 +1408,22 @@ async function handleMessage(userMessage, replyToken, userId) {
         // 補充 LINE 顯示限制，避免回覆出現不適合手機閱讀的格式。
         const enrichedMessage = userMessage + "\n\n(系統提示：請用專業、親切、清楚的語氣回答；不要使用 markdown 粗體星號；每則回覆請自然加入 1 到 3 個常見 Emoji 小圖標，例如 😊、📌、✅、🔎、☎️；避免罕見符號、裝飾字、顏文字或特殊字元。)";
 
-        // 1. 將使用者的訊息傳送給 Dify Agent (改用 streaming 模式)
-        const difyResponse = await axios.post('https://api.dify.ai/v1/chat-messages', {
+        const difyUserId = buildDifyUserId(userId);
+        const conversationId = getDifyConversationId(difyUserId);
+        const difyRequestBody = {
             inputs: {},
             query: enrichedMessage,
             response_mode: 'streaming', // <--- 修正：Dify Agent 專用模式
             // Dify 僅需要穩定的使用者識別值；不傳送完整 LINE User ID，
             // 同時避免部分帳號識別格式被模型供應商判定為 invalid_param。
-            user: buildDifyUserId(userId)
-        }, {
+            user: difyUserId
+        };
+        if (conversationId) {
+            difyRequestBody.conversation_id = conversationId;
+        }
+
+        // 1. 將使用者的訊息傳送給 Dify Agent (改用 streaming 模式)
+        const difyResponse = await axios.post('https://api.dify.ai/v1/chat-messages', difyRequestBody, {
             headers: {
                 'Authorization': `Bearer ${DIFY_API_KEY}`,
                 'Content-Type': 'application/json'
@@ -1395,6 +1439,7 @@ async function handleMessage(userMessage, replyToken, userId) {
         let streamBuffer = ''; // 【重要修復：斷字殺手】水桶緩衝區
         let streamParseErrorCount = 0;
         let streamError = null;
+        let receivedConversationId = '';
         const observedStreamEvents = new Set();
         const utf8Decoder = new StringDecoder('utf8');
 
@@ -1424,6 +1469,15 @@ async function handleMessage(userMessage, replyToken, userId) {
 
                         if (eventName) {
                             observedStreamEvents.add(eventName.replace(/[^a-z0-9_-]/g, '').slice(0, 40));
+                        }
+
+                        const eventConversationId = typeof data.conversation_id === 'string'
+                            ? data.conversation_id.trim()
+                            : typeof data.data?.conversation_id === 'string'
+                                ? data.data.conversation_id.trim()
+                                : '';
+                        if (eventConversationId && eventConversationId.length <= 200) {
+                            receivedConversationId = eventConversationId;
                         }
 
                         if ((eventName === 'message' || eventName === 'agent_message') && typeof data.answer === 'string') {
@@ -1470,6 +1524,10 @@ async function handleMessage(userMessage, replyToken, userId) {
                 streamBuffer += utf8Decoder.end();
                 if (streamBuffer.trim()) {
                     processStreamLines([streamBuffer]);
+                }
+
+                if (receivedConversationId) {
+                    rememberDifyConversationId(difyUserId, receivedConversationId);
                 }
 
                 replyText = replacementReplyReceived

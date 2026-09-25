@@ -13,13 +13,15 @@ const TEST_ENV = {
 let googlePlacesRequestCount = 0;
 let lastGooglePlacesBody = null;
 let lastGooglePlacesUrl = null;
+let lastWeatherLocationName = null;
 
 function createFakeHttp() {
     return {
-        async get(url) {
+        async get(url, options = {}) {
             if (url.includes('F-C0032-001')) {
+                lastWeatherLocationName = options.params?.locationName || null;
                 return { data: { records: { location: [{
-                    locationName: '桃園市',
+                    locationName: lastWeatherLocationName || '桃園市',
                     weatherElement: [
                         { elementName: 'Wx', time: [{ startTime: '2026-07-19 06:00:00', parameter: { parameterName: '多雲' } }] },
                         { elementName: 'MinT', time: [{ startTime: '2026-07-19 06:00:00', parameter: { parameterName: '27' } }] },
@@ -98,8 +100,18 @@ test('weather API supports valid and invalid requests', async () => {
     const valid = await request('/api/tools/weather?location=%E6%A1%83%E5%9C%92%E5%B8%82');
     const body = await valid.json();
     assert.equal(valid.status, 200);
+    assert.equal(lastWeatherLocationName, '桃園市');
     assert.equal(body.weather, '多雲');
     assert.deepEqual(body.temperature, { min: 27, max: 33, unit: 'C' });
+
+    const taipei = await request('/api/tools/weather?location=%E5%8F%B0%E5%8C%97%E5%B8%82');
+    assert.equal(taipei.status, 200);
+    assert.equal(lastWeatherLocationName, '臺北市');
+    assert.equal((await taipei.json()).location, '臺北市');
+
+    const englishTaipei = await request('/api/tools/weather?location=Taipei');
+    assert.equal(englishTaipei.status, 200);
+    assert.equal((await englishTaipei.json()).location, '臺北市');
 
     const invalid = await request('/api/tools/weather');
     assert.equal(invalid.status, 400);

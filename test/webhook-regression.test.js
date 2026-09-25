@@ -115,6 +115,11 @@ test('follow event replies with two welcome messages', async () => {
     assert.equal(response.status, 200);
     const reply = calls.find((call) => call.url.includes('/message/reply'));
     assert.equal(reply.body.messages.length, 2);
+    assert.match(reply.body.messages[1].text, /實習處主任 程主任：601/);
+    assert.match(reply.body.messages[1].text, /實習處組長：602/);
+    assert.match(reply.body.messages[1].text, /建教組：602/);
+    assert.match(reply.body.messages[1].text, /就業輔導組：602/);
+    assert.doesNotMatch(reply.body.messages[1].text, /實習處組長：607|就業輔導組：608/);
 });
 
 test('text message still calls Dify and LINE Reply API', async () => {
@@ -134,6 +139,58 @@ test('text message still calls Dify and LINE Reply API', async () => {
     );
     assert.notEqual(difyCall.body.user, 'U2');
     assert.ok(calls.some((call) => call.url.includes('/message/reply')));
+});
+
+test('Dify conversation ID is reused only for the same anonymized user', async () => {
+    calls.length = 0;
+    difyStreamPayload = [
+        'data: {"event":"agent_message","conversation_id":"conversation-test-123","answer":"第一則回答"}',
+        'data: {"event":"message_end","conversation_id":"conversation-test-123"}',
+        ''
+    ].join('\n\n');
+
+    const firstResponse = await webhook({ events: [{
+        type: 'message',
+        webhookEventId: 'conversation-first-event',
+        replyToken: 'conversation-first-token',
+        source: { type: 'user', userId: 'U-CONVERSATION-SAME' },
+        message: { id: 'M-CONVERSATION-FIRST', type: 'text', text: '607 公車' }
+    }] });
+    assert.equal(firstResponse.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    const firstDifyCall = calls.find((call) => call.url.includes('dify.ai/v1/chat-messages'));
+    assert.ok(firstDifyCall);
+    assert.equal(Object.hasOwn(firstDifyCall.body, 'conversation_id'), false);
+
+    calls.length = 0;
+    const secondResponse = await webhook({ events: [{
+        type: 'message',
+        webhookEventId: 'conversation-second-event',
+        replyToken: 'conversation-second-token',
+        source: { type: 'user', userId: 'U-CONVERSATION-SAME' },
+        message: { id: 'M-CONVERSATION-SECOND', type: 'text', text: '銘傳大學站' }
+    }] });
+    assert.equal(secondResponse.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    const secondDifyCall = calls.find((call) => call.url.includes('dify.ai/v1/chat-messages'));
+    assert.equal(secondDifyCall.body.conversation_id, 'conversation-test-123');
+
+    calls.length = 0;
+    const otherUserResponse = await webhook({ events: [{
+        type: 'message',
+        webhookEventId: 'conversation-other-user-event',
+        replyToken: 'conversation-other-user-token',
+        source: { type: 'user', userId: 'U-CONVERSATION-OTHER' },
+        message: { id: 'M-CONVERSATION-OTHER', type: 'text', text: '銘傳大學站' }
+    }] });
+    assert.equal(otherUserResponse.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    const otherUserDifyCall = calls.find((call) => call.url.includes('dify.ai/v1/chat-messages'));
+    assert.ok(otherUserDifyCall);
+    assert.equal(Object.hasOwn(otherUserDifyCall.body, 'conversation_id'), false);
 });
 
 test('Dify text_chunk event is returned to LINE', async () => {
