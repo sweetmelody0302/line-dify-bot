@@ -31,8 +31,20 @@ function createFakeHttp() {
                 }] } } };
             }
             if (url.includes('/Bus/Route/')) return { data: [{ RouteUID: 'TAO1', RouteName: { Zh_tw: '1' } }] };
-            if (url.includes('/Bus/StopOfRoute/')) return { data: [{ Direction: 0, Stops: [{ StopUID: 'S1', StopName: { Zh_tw: '測試站' }, StopSequence: 1 }] }] };
-            if (url.includes('/Bus/EstimatedTimeOfArrival/')) return { data: [{ Direction: 0, StopUID: 'S1', StopName: { Zh_tw: '測試站' }, EstimateTime: 180 }] };
+            if (url.includes('/Bus/StopOfRoute/')) return { data: [{ Direction: 0, Stops: [
+                { StopUID: 'S1', StopName: { Zh_tw: '測試站' }, StopSequence: 1 },
+                { StopUID: 'S2', StopName: { Zh_tw: '銘傳資管大樓' }, StopSequence: 2 },
+                { StopUID: 'S3', StopName: { Zh_tw: '銘傳設計大樓' }, StopSequence: 3 },
+                { StopUID: 'S4', StopName: { Zh_tw: '銘傳郵政代辦所' }, StopSequence: 4 },
+                { StopUID: 'S5', StopName: { Zh_tw: '壽山高中' }, StopSequence: 5 }
+            ] }] };
+            if (url.includes('/Bus/EstimatedTimeOfArrival/')) return { data: [
+                { Direction: 0, StopUID: 'S1', StopName: { Zh_tw: '測試站' }, EstimateTime: 180 },
+                { Direction: 0, StopUID: 'S2', StopName: { Zh_tw: '銘傳資管大樓' }, EstimateTime: 240 },
+                { Direction: 0, StopUID: 'S3', StopName: { Zh_tw: '銘傳設計大樓' }, EstimateTime: 360 },
+                { Direction: 0, StopUID: 'S4', StopName: { Zh_tw: '銘傳郵政代辦所' }, EstimateTime: 480 },
+                { Direction: 0, StopUID: 'S5', StopName: { Zh_tw: '壽山高中' }, EstimateTime: 600 }
+            ] };
             if (url.includes('/Bus/Station/NearBy')) return { data: [{ StationID: 'N1', StationName: { Zh_tw: '附近站' }, Stops: [] }] };
             throw new Error(`Unexpected GET ${url}`);
         },
@@ -126,6 +138,23 @@ test('bus API supports route query and rejects missing query', async () => {
     const invalid = await request('/api/tools/bus?city=Taoyuan');
     assert.equal(invalid.status, 400);
     assert.equal((await invalid.json()).error.code, 'MISSING_BUS_QUERY');
+});
+
+test('bus API maps the Ming Chuan University alias to campus stop names', async () => {
+    const response = await request('/api/tools/bus?city=Taoyuan&route=261&direction=0&stop=%E9%8A%98%E5%82%B3%E5%A4%A7%E5%AD%B8%E7%AB%99');
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.directions[0].stops.map((stop) => stop.name), [
+        '銘傳資管大樓',
+        '銘傳設計大樓',
+        '銘傳郵政代辦所'
+    ]);
+    assert.deepEqual(body.arrivals.map((arrival) => arrival.stop_name), [
+        '銘傳資管大樓',
+        '銘傳設計大樓',
+        '銘傳郵政代辦所'
+    ]);
 });
 
 test('food API returns at most five results and rejects missing location', async () => {

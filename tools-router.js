@@ -682,7 +682,8 @@ async function getTdxToken(http, env, readToken, writeToken) {
 
 function buildRouteResult(city, route, direction, stop, routes, stops, arrivals, currentDate) {
     const selectedStops = (stops || []).filter((item) => direction === null || String(item.Direction) === direction);
-    const stopIds = new Set(selectedStops.flatMap((item) => (item.Stops || []).filter((entry) => !stop || localizedName(entry.StopName)?.includes(stop)).map((entry) => entry.StopUID)));
+    const matchingStops = (entries) => (entries || []).filter((entry) => busStopMatches(localizedName(entry.StopName), stop));
+    const stopIds = new Set(selectedStops.flatMap((item) => matchingStops(item.Stops).map((entry) => entry.StopUID)));
     return {
         query_type: 'route',
         city,
@@ -696,7 +697,7 @@ function buildRouteResult(city, route, direction, stop, routes, stops, arrivals,
         directions: selectedStops.map((item) => ({
             direction: item.Direction,
             direction_label: item.Direction === 0 ? '去程' : item.Direction === 1 ? '返程' : '未知',
-            stops: (item.Stops || []).filter((entry) => !stop || localizedName(entry.StopName)?.includes(stop)).map((entry) => ({
+            stops: matchingStops(item.Stops).map((entry) => ({
                 stop_uid: entry.StopUID || null,
                 name: localizedName(entry.StopName),
                 sequence: entry.StopSequence ?? null
@@ -714,6 +715,29 @@ function buildRouteResult(city, route, direction, stop, routes, stops, arrivals,
         source: '交通部 TDX',
         updated_at: currentDate.toISOString()
     };
+}
+
+function busStopMatches(stopName, requestedStop) {
+    if (!requestedStop) return true;
+    const normalizedName = normalizeBusStopText(stopName);
+    const normalizedQuery = normalizeBusStopText(requestedStop);
+    if (!normalizedName || !normalizedQuery) return false;
+
+    const aliases = {
+        '銘傳大學': ['銘傳'],
+        '銘傳大學桃園校區': ['銘傳'],
+        '銘傳桃園校區': ['銘傳']
+    };
+    const searchTerms = [normalizedQuery, ...(aliases[normalizedQuery] || [])];
+    return searchTerms.some((term) => normalizedName.includes(term));
+}
+
+function normalizeBusStopText(value) {
+    return String(value || '')
+        .normalize('NFKC')
+        .replace(/臺/g, '台')
+        .replace(/[\s·・．。()（）\-－—_]/g, '')
+        .replace(/(?:公車)?站$/u, '');
 }
 
 function localizedName(value) {
