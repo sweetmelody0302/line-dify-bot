@@ -28,6 +28,9 @@ const HEALTHCARE_TYPES = {
 };
 const SCHOOL_ADDRESS = '333 桃園市龜山區新興里明德路162巷100號';
 const SCHOOL_LOCATION = { latitude: 24.98907, longitude: 121.34097 };
+// Google Places address localization is pinned to Traditional Chinese (Taiwan) so
+// Taiwan formattedAddress values never come back localized for another language.
+const GOOGLE_PLACES_LANGUAGE = 'zh-TW';
 
 function createToolsRouter(options = {}) {
     const router = express.Router();
@@ -199,7 +202,7 @@ function createToolsRouter(options = {}) {
         const budget = optionalText(req.query.budget, 'budget', 30);
         const dietary = optionalEnum(req.query.dietary, 'dietary', [...DIETARY_VALUES]);
         const openNow = optionalBoolean(req.query.open_now, 'open_now');
-        const language = optionalLanguage(req.query.language);
+        optionalLanguage(req.query.language);
         if ((latitude === null) !== (longitude === null)) {
             throw apiError(400, 'MISSING_COORDINATE', 'latitude 與 longitude 必須一起提供。');
         }
@@ -223,10 +226,10 @@ function createToolsRouter(options = {}) {
                 maxResultCount: 20,
                 locationRestriction: { circle: { center: searchCenter, radius: 2500 } },
                 rankPreference: 'POPULARITY',
-                languageCode: googleLanguage(language),
+                languageCode: GOOGLE_PLACES_LANGUAGE,
                 regionCode: 'TW'
             }
-            : { textQuery, pageSize: 5, languageCode: googleLanguage(language), regionCode: 'TW' };
+            : { textQuery, pageSize: 5, languageCode: GOOGLE_PLACES_LANGUAGE, regionCode: 'TW' };
         if (!useNearbySearch && openNow !== null) body.openNow = openNow;
         if (!useNearbySearch && latitude !== null) {
             body.locationBias = { circle: { center: { latitude, longitude }, radius: 3000 } };
@@ -292,7 +295,7 @@ function createToolsRouter(options = {}) {
         const district = optionalText(req.query.district, 'district', 20);
         const keyword = optionalText(req.query.keyword, 'keyword', 60);
         const openNow = optionalBoolean(req.query.open_now, 'open_now');
-        const language = optionalLanguage(req.query.language);
+        optionalLanguage(req.query.language);
         const limit = positiveInteger(req.query.limit, 5, 1, 5);
 
         if (!type) throw apiError(400, 'MISSING_HEALTHCARE_TYPE', '請提供 type：clinic、hospital 或 pharmacy。');
@@ -318,10 +321,10 @@ function createToolsRouter(options = {}) {
                 maxResultCount: 20,
                 locationRestriction: { circle: { center: searchCenter, radius: 5000 } },
                 rankPreference: 'DISTANCE',
-                languageCode: googleLanguage(language),
+                languageCode: GOOGLE_PLACES_LANGUAGE,
                 regionCode: 'TW'
             }
-            : { textQuery, pageSize: 20, languageCode: googleLanguage(language), regionCode: 'TW' };
+            : { textQuery, pageSize: 20, languageCode: GOOGLE_PLACES_LANGUAGE, regionCode: 'TW' };
         if (!useNearbySearch && openNow !== null) body.openNow = openNow;
         if (!useNearbySearch && latitude !== null) {
             body.locationBias = { circle: { center: searchCenter, radius: 5000 } };
@@ -751,10 +754,6 @@ function dietaryKeyword(value) {
         vegetarian: '素食', vegan: '純素', halal: '清真 halal',
         no_pork: '不含豬肉', no_beef: '不含牛肉', allergy: '過敏友善'
     }[value] || '';
-}
-
-function googleLanguage(language) {
-    return ({ my: 'my', lo: 'lo' })[language] || language || 'zh-TW';
 }
 
 function haversineMeters(lat1, lon1, lat2, lon2) {

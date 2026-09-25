@@ -86,12 +86,29 @@ async function startServer() {
     return { server, baseUrl: `http://127.0.0.1:${server.address().port}` };
 }
 
+async function startServerWithEnv(env) {
+    const app = express();
+    app.use('/api/tools', createToolsRouter({
+        env,
+        http: createFakeHttp(),
+        now: () => new Date('2026-07-19T04:34:56.000Z')
+    }));
+    const server = await new Promise((resolve) => {
+        const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+    });
+    return { server, baseUrl: `http://127.0.0.1:${server.address().port}` };
+}
+
 let context;
 test.before(async () => { context = await startServer(); });
 test.after(() => new Promise((resolve) => context.server.close(resolve)));
 
 async function request(path, authenticated = true) {
     return fetch(`${context.baseUrl}${path}`, { headers: authenticated ? { 'X-Tools-Key': TEST_ENV.TOOLS_API_KEY } : {} });
+}
+
+async function requestOn(baseUrl, path) {
+    return fetch(`${baseUrl}${path}`, { headers: { 'X-Tools-Key': TEST_ENV.TOOLS_API_KEY } });
 }
 
 test('tools authentication rejects missing key', async () => {
@@ -317,6 +334,62 @@ test('healthcare API only filters by district when explicitly requested', async 
     assert.equal(restrictedBody.queried_district, '龜山區');
     assert.ok(restrictedBody.results.length > 0);
     assert.ok(restrictedBody.results.every((place) => place.address.includes('龜山區')));
+});
+
+test('food API always requests Traditional Chinese addresses from Google Places', async () => {
+    const isolated = await startServerWithEnv({ ...TEST_ENV, GOOGLE_PLACES_RATE_LIMIT_PER_MINUTE: '600' });
+    try {
+        const nearby = await requestOn(isolated.baseUrl, '/api/tools/food?location=%E4%B8%96%E7%B4%80%E7%B6%A0%E8%83%BD%E5%B7%A5%E5%95%86&open_now=true&language=en');
+        const nearbyBody = await nearby.json();
+        assert.equal(nearby.status, 200);
+        assert.match(lastGooglePlacesUrl, /places:searchNearby$/);
+        assert.equal(lastGooglePlacesBody.languageCode, 'zh-TW');
+        assert.ok(nearbyBody.results.length > 0);
+        assert.ok(nearbyBody.results.every((place) => /^桃園市(龜山|桃園)區測試路 \d+ 號$/.test(place.address)));
+
+        const textSearch = await requestOn(isolated.baseUrl, '/api/tools/food?location=%E6%A1%83%E5%9C%92%E5%B8%82&language=en');
+        const textSearchBody = await textSearch.json();
+        assert.equal(textSearch.status, 200);
+        assert.match(lastGooglePlacesUrl, /places:searchText$/);
+        assert.equal(lastGooglePlacesBody.languageCode, 'zh-TW');
+        assert.equal(textSearchBody.results[0].address, '桃園市龜山區測試路 1 號');
+    } finally {
+        await new Promise((resolve) => isolated.server.close(resolve));
+    }
+});
+
+test('healthcare API always requests Traditional Chinese addresses from Google Places', async () => {
+    const isolated = await startServerWithEnv({ ...TEST_ENV, GOOGLE_PLACES_RATE_LIMIT_PER_MINUTE: '600' });
+    try {
+        const nearby = await requestOn(isolated.baseUrl, '/api/tools/healthcare?type=clinic&latitude=25&longitude=121&limit=3&language=en');
+        const nearbyBody = await nearby.json();
+        assert.equal(nearby.status, 200);
+        assert.match(lastGooglePlacesUrl, /places:searchNearby$/);
+        assert.equal(lastGooglePlacesBody.languageCode, 'zh-TW');
+        assert.equal(nearbyBody.results.length, 3);
+        assert.ok(nearbyBody.results.every((place) => /^桃園市(龜山|桃園)區測試路 \d+ 號$/.test(place.address)));
+
+        const textSearch = await requestOn(isolated.baseUrl, '/api/tools/healthcare?type=clinic&location=Taoyuan&language=en');
+        const textSearchBody = await textSearch.json();
+        assert.equal(textSearch.status, 200);
+        assert.match(lastGooglePlacesUrl, /places:searchText$/);
+        assert.equal(lastGooglePlacesBody.languageCode, 'zh-TW');
+        assert.equal(textSearchBody.results[0].address, '桃園市龜山區測試路 1 號');
+    } finally {
+        await new Promise((resolve) => isolated.server.close(resolve));
+    }
+});
+
+test('food and healthcare still validate the language parameter', async () => {
+    const countBefore = googlePlacesRequestCount;
+    const foodInvalid = await request('/api/tools/food?location=Taoyuan&language=de');
+    assert.equal(foodInvalid.status, 400);
+    assert.equal((await foodInvalid.json()).error.code, 'INVALID_LANGUAGE');
+
+    const healthcareInvalid = await request('/api/tools/healthcare?type=clinic&location=Taoyuan&language=de');
+    assert.equal(healthcareInvalid.status, 400);
+    assert.equal((await healthcareInvalid.json()).error.code, 'INVALID_LANGUAGE');
+    assert.equal(googlePlacesRequestCount, countBefore);
 });
 
 test('OpenAPI document is public and contains all Dify operation IDs', async () => {
